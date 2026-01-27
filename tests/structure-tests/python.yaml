@@ -1,0 +1,108 @@
+# Container Structure Tests for Python Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  # Inherited from cc
+  - name: "CA certificates exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+  - name: "libc.so.6 exists"
+    path: "/lib/x86_64-linux-gnu/libc.so.6"
+    shouldExist: true
+
+  - name: "libssl.so.3 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    shouldExist: true
+
+  - name: "libstdc++.so.6 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libstdc++.so.6"
+    shouldExist: true
+
+  # Python binaries
+  - name: "python3 binary exists"
+    path: "/usr/local/bin/python3"
+    shouldExist: true
+
+  - name: "python symlink exists"
+    path: "/usr/local/bin/python"
+    shouldExist: true
+
+  - name: "pip3 binary exists"
+    path: "/usr/local/bin/pip3"
+    shouldExist: true
+
+  - name: "pip symlink exists"
+    path: "/usr/local/bin/pip"
+    shouldExist: true
+
+  # Python shared library (version agnostic check)
+  - name: "Python lib directory exists"
+    path: "/usr/local/lib"
+    shouldExist: true
+
+  # No shell (distroless)
+  - name: "No shell exists"
+    path: "/bin/sh"
+    shouldExist: false
+
+  - name: "No apt exists"
+    path: "/usr/bin/apt"
+    shouldExist: false
+
+  # Cleanup verification - no test directories
+  - name: "No test directory in lib"
+    path: "/usr/local/lib/python3.13/test"
+    shouldExist: false
+
+# =============================================================================
+# Command Tests
+# =============================================================================
+commandTests:
+  - name: "Python version check"
+    command: "python3"
+    args: ["--version"]
+    expectedOutput: ["Python 3\\."]
+    exitCode: 0
+
+  - name: "pip version check"
+    command: "pip3"
+    args: ["--version"]
+    expectedOutput: ["pip"]
+    exitCode: 0
+
+  - name: "Python can import ssl"
+    command: "python3"
+    args: ["-c", "import ssl; print(ssl.OPENSSL_VERSION)"]
+    expectedOutput: ["OpenSSL"]
+    exitCode: 0
+
+  - name: "Python can import sqlite3"
+    command: "python3"
+    args: ["-c", "import sqlite3; print('sqlite3 ok')"]
+    expectedOutput: ["sqlite3 ok"]
+    exitCode: 0
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "PATH"
+      value: "/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    - key: "SSL_CERT_FILE"
+      value: "/etc/ssl/certs/ca-certificates.crt"
+    - key: "LANG"
+      value: "C.UTF-8"
+    - key: "PYTHONDONTWRITEBYTECODE"
+      value: "1"
+    - key: "PYTHONUNBUFFERED"
+      value: "1"
+  entrypoint: ["python3"]
+  cmd: ["--version"]
+  workdir: "/app"
