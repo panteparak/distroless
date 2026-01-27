@@ -1,0 +1,255 @@
+name: Build Node.js Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/nodejs/**'
+      - 'images/cc/**'
+      - 'images/base/**'
+      - 'images/static/**'
+      - '.github/workflows/build-nodejs.yaml'
+  pull_request:
+    paths:
+      - 'images/nodejs/**'
+      - '.github/workflows/build-nodejs.yaml'
+  schedule:
+    - cron: '0 3 * * 1'  # Weekly Monday 3am UTC
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/distroless
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfiles
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: images/nodejs/Dockerfile.*
+          recursive: true
+          ignore: DL3008,DL3018
+
+  build:
+    needs: lint
+    # Only build on push/schedule - PRs can't access base images from GHCR yet
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        node_version: ['20', '22', '24']
+        debian: [debian12]
+        variant: [root, nonroot]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set build args
+        id: args
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          if [ "$VARIANT" = "nonroot" ]; then
+            echo "uid=65532" >> "$GITHUB_OUTPUT"
+            echo "workdir=/home/nonroot" >> "$GITHUB_OUTPUT"
+            echo "tag_suffix=-nonroot" >> "$GITHUB_OUTPUT"
+          else
+            echo "uid=0" >> "$GITHUB_OUTPUT"
+            echo "workdir=/app" >> "$GITHUB_OUTPUT"
+            echo "tag_suffix=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: images/nodejs
+          file: images/nodejs/Dockerfile.${{ matrix.node_version }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}-${{ matrix.debian }}${{ steps.args.outputs.tag_suffix }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}${{ steps.args.outputs.tag_suffix }}
+          build-args: |
+            CC_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc
+            TAG=${{ matrix.debian }}${{ steps.args.outputs.tag_suffix }}
+            USER=${{ matrix.variant }}
+            UID=${{ steps.args.outputs.uid }}
+            WORKDIR=${{ steps.args.outputs.workdir }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate SBOM
+        if: github.event_name != 'pull_request'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}-${{ matrix.debian }}${{ steps.args.outputs.tag_suffix }}
+          format: spdx-json
+          output-file: sbom-nodejs-${{ matrix.node_version }}.spdx.json
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          cosign sign --yes "${REGISTRY_PREFIX}/nodejs@${IMAGE_DIGEST}"
+
+      - name: Upload SBOM
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-nodejs-${{ matrix.node_version }}-${{ matrix.variant }}
+          path: sbom-nodejs-${{ matrix.node_version }}.spdx.json
+
+  build-debug:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        node_version: ['20', '22', '24']
+        debian: [debian12]
+        variant: [root, nonroot]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set build args
+        id: args
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          if [ "$VARIANT" = "nonroot" ]; then
+            echo "tag_suffix=-nonroot" >> "$GITHUB_OUTPUT"
+            echo "debug_suffix=-debug-nonroot" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_suffix=" >> "$GITHUB_OUTPUT"
+            echo "debug_suffix=-debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push debug image
+        uses: docker/build-push-action@v6
+        with:
+          context: images/nodejs
+          file: images/nodejs/Dockerfile.debug
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}-${{ matrix.debian }}${{ steps.args.outputs.debug_suffix }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}${{ steps.args.outputs.debug_suffix }}
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs
+            NODE_VERSION=${{ matrix.node_version }}
+            TAG=${{ matrix.debian }}${{ steps.args.outputs.tag_suffix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node_version: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image for testing
+        if: github.event_name != 'pull_request'
+        env:
+          NODE_VERSION: ${{ matrix.node_version }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          docker pull "${REGISTRY_PREFIX}/nodejs:${NODE_VERSION}-debian12"
+
+      - name: Run structure tests
+        if: github.event_name != 'pull_request'
+        uses: plexsystems/container-structure-test-action@v0.3.0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}-debian12
+          config: tests/structure-tests/nodejs.yaml
+
+  security-scan:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node_version: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.node_version }}-debian12'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
