@@ -66,6 +66,7 @@ test-nodejs: ## Run Node.js structure tests
 			--config tests/structure-tests/nodejs.yaml || true; \
 	done
 
+
 # =============================================================================
 # Build targets
 # =============================================================================
