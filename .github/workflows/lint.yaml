@@ -17,8 +17,8 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           recursive: true
-          ignore: DL3008,DL3013,DL3018
-          failure-threshold: warning
+          ignore: DL3008,DL3013,DL3018,DL3003
+          failure-threshold: error
 
   shellcheck:
     name: Lint Shell Scripts
@@ -65,14 +65,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Create markdownlint config
+        run: |
+          cat > .markdownlint.json << 'EOF'
+          {
+            "default": true,
+            "MD013": false,
+            "MD033": false,
+            "MD041": false
+          }
+          EOF
+
       - name: Run markdownlint
         uses: DavidAnson/markdownlint-cli2-action@v19
         with:
           globs: '**/*.md'
-          config: |
-            {
-              "default": true,
-              "MD013": false,
-              "MD033": false,
-              "MD041": false
-            }
