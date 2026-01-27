@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Static Debug Image
+# =============================================================================
+# Adds BusyBox shell for debugging and troubleshooting.
+# This image inherits from the production static image.
+#
+# Usage:
+#   docker run -it ghcr.io/panteparak/distroless/static:debian12-debug /busybox/sh
+# =============================================================================
+
+ARG BASE_IMAGE=ghcr.io/panteparak/distroless/static
+ARG TAG=debian12
+
+# =============================================================================
+# Stage 1: Get BusyBox
+# =============================================================================
+FROM debian:bookworm-slim AS busybox
+
+ARG TARGETARCH
+
+# Install busybox-static (statically linked, works on any base)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    busybox-static \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create busybox directory structure
+RUN mkdir -p /busybox \
+    && cp /bin/busybox /busybox/busybox \
+    && chmod +x /busybox/busybox
+
+# Install busybox applets as symlinks
+RUN /busybox/busybox --install -s /busybox
+
+# =============================================================================
+# Stage 2: Final Debug Image
+# =============================================================================
+FROM ${BASE_IMAGE}:${TAG}
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Static Debug"
+LABEL org.opencontainers.image.description="Static image with BusyBox for debugging"
+
+# Copy busybox with all symlinks
+COPY --from=busybox /busybox /busybox
+
+# Add busybox to PATH
+ENV PATH="$PATH:/busybox"
+
+# Set shell as entrypoint for interactive debugging
+ENTRYPOINT ["/busybox/sh"]

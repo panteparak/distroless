@@ -1,0 +1,62 @@
+# Container Structure Tests for Static Debug Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  - name: "BusyBox binary exists"
+    path: "/busybox/busybox"
+    shouldExist: true
+
+  - name: "BusyBox sh symlink exists"
+    path: "/busybox/sh"
+    shouldExist: true
+
+  - name: "BusyBox ls symlink exists"
+    path: "/busybox/ls"
+    shouldExist: true
+
+  - name: "BusyBox cat symlink exists"
+    path: "/busybox/cat"
+    shouldExist: true
+
+  - name: "CA certificates still exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+# =============================================================================
+# Command Tests
+# =============================================================================
+commandTests:
+  - name: "BusyBox version check"
+    command: ["/busybox/busybox", "--help"]
+    expectedOutput: ["BusyBox"]
+    exitCode: 0
+
+  - name: "Can list files"
+    command: ["/busybox/ls", "/"]
+    expectedOutput: ["etc", "tmp"]
+    exitCode: 0
+
+  - name: "Can read passwd"
+    command: ["/busybox/cat", "/etc/passwd"]
+    expectedOutput: ["root", "nonroot"]
+    exitCode: 0
+
+  - name: "Can check environment"
+    command: ["/busybox/sh", "-c", "echo $PATH"]
+    expectedOutput: ["/busybox"]
+    exitCode: 0
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "PATH"
+      value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/busybox"
+
+  entrypoint: ["/busybox/sh"]

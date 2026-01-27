@@ -1,0 +1,97 @@
+# Container Structure Tests for Static Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  - name: "CA certificates exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+  - name: "passwd file exists"
+    path: "/etc/passwd"
+    shouldExist: true
+
+  - name: "group file exists"
+    path: "/etc/group"
+    shouldExist: true
+
+  - name: "nsswitch.conf exists"
+    path: "/etc/nsswitch.conf"
+    shouldExist: true
+
+  - name: "os-release exists"
+    path: "/etc/os-release"
+    shouldExist: true
+
+  - name: "timezone data exists"
+    path: "/usr/share/zoneinfo"
+    shouldExist: true
+
+  - name: "tmp directory exists"
+    path: "/tmp"
+    shouldExist: true
+
+  - name: "home/nonroot directory exists"
+    path: "/home/nonroot"
+    shouldExist: true
+
+  - name: "No shell exists (distroless)"
+    path: "/bin/sh"
+    shouldExist: false
+
+  - name: "No bash exists (distroless)"
+    path: "/bin/bash"
+    shouldExist: false
+
+  - name: "No apt exists (distroless)"
+    path: "/usr/bin/apt"
+    shouldExist: false
+
+# =============================================================================
+# File Content Tests
+# =============================================================================
+fileContentTests:
+  - name: "passwd contains root user"
+    path: "/etc/passwd"
+    expectedContents: ["root:x:0:0:root:/root:/sbin/nologin"]
+
+  - name: "passwd contains nonroot user"
+    path: "/etc/passwd"
+    expectedContents: ["nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin"]
+
+  - name: "passwd contains nobody user"
+    path: "/etc/passwd"
+    expectedContents: ["nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin"]
+
+  - name: "group contains nonroot group"
+    path: "/etc/group"
+    expectedContents: ["nonroot:x:65532:"]
+
+  - name: "nsswitch.conf has hosts configuration"
+    path: "/etc/nsswitch.conf"
+    expectedContents: ["hosts:"]
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "PATH"
+      value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    - key: "SSL_CERT_FILE"
+      value: "/etc/ssl/certs/ca-certificates.crt"
+
+  workdir: "/"
+
+# =============================================================================
+# Command Tests (for debug variant)
+# =============================================================================
+# Note: These tests only work on the debug variant
+# commandTests:
+#   - name: "busybox exists"
+#     command: ["/busybox/busybox", "--help"]
+#     expectedOutput: ["BusyBox"]
