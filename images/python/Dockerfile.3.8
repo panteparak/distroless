@@ -1,0 +1,150 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Python 3.8 Image (END OF LIFE)
+# =============================================================================
+# CC image + Python 3.8 runtime compiled from source
+#
+# WARNING: Python 3.8 reached end-of-life. No security updates available.
+# Consider upgrading to Python 3.10+ for production workloads.
+#
+# Use for: Legacy applications requiring Python 3.8
+# =============================================================================
+
+ARG CC_IMAGE=ghcr.io/panteparak/distroless/cc
+ARG TAG=debian12
+ARG DEBIAN_VERSION=bookworm
+
+# =============================================================================
+# Stage 1: Python Builder
+# =============================================================================
+FROM debian:${DEBIAN_VERSION}-slim AS builder
+
+ARG TARGETARCH
+
+# Python version configuration (final 3.8 release)
+ENV PYTHON_VERSION=3.8.20
+ENV GPG_KEY=E3FF2839C048B25C084DEBE9B26995E310250568
+
+# Prevent Python from writing bytecode and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+# Set shell with pipefail for proper error handling in pipelines
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    dpkg-dev \
+    gcc \
+    gnupg \
+    libbluetooth-dev \
+    libbz2-dev \
+    libc6-dev \
+    libdb-dev \
+    libexpat1-dev \
+    libffi-dev \
+    libgdbm-dev \
+    liblzma-dev \
+    libncursesw5-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    make \
+    tk-dev \
+    uuid-dev \
+    wget \
+    xz-utils \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and verify Python source
+RUN set -eux; \
+    wget -q -O python.tar.xz "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"; \
+    wget -q -O python.tar.xz.asc "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz.asc"; \
+    GNUPGHOME="$(mktemp -d)"; \
+    export GNUPGHOME; \
+    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$GPG_KEY"; \
+    gpg --batch --verify python.tar.xz.asc python.tar.xz; \
+    gpgconf --kill all; \
+    rm -rf "$GNUPGHOME" python.tar.xz.asc; \
+    mkdir -p /usr/src/python; \
+    tar --extract --directory /usr/src/python --strip-components=1 --file python.tar.xz; \
+    rm python.tar.xz
+
+# Compile Python with optimizations
+WORKDIR /usr/src/python
+RUN set -eux; \
+    gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
+    ./configure \
+        --build="$gnuArch" \
+        --enable-loadable-sqlite-extensions \
+        --enable-optimizations \
+        --enable-option-checking=fatal \
+        --enable-shared \
+        --with-lto \
+        --with-ensurepip \
+    ; \
+    nproc="$(nproc)"; \
+    EXTRA_CFLAGS="$(dpkg-buildflags --get CFLAGS)"; \
+    LDFLAGS="$(dpkg-buildflags --get LDFLAGS)"; \
+    LDFLAGS="${LDFLAGS:--Wl},--strip-all"; \
+    make -j "$nproc" \
+        "EXTRA_CFLAGS=${EXTRA_CFLAGS:-}" \
+        "LDFLAGS=${LDFLAGS:-}" \
+    ; \
+    make install DESTDIR=/python-install; \
+    rm -rf /usr/src/python
+
+# Clean up Python installation
+RUN set -eux; \
+    find /python-install -depth \
+        \( \
+            \( -type d -a \( -name test -o -name tests -o -name idle_test \) \) \
+            -o \( -type f -a \( -name '*.pyc' -o -name '*.pyo' -o -name 'libpython*.a' \) \) \
+        \) -exec rm -rf '{}' + \
+    ; \
+    find /python-install -type d -name '__pycache__' -exec rm -rf '{}' + 2>/dev/null || true; \
+    rm -rf /python-install/root/.cache; \
+    rm -f /python-install/usr/local/bin/2to3* \
+          /python-install/usr/local/bin/idle* \
+          /python-install/usr/local/bin/pydoc*
+
+# Create symlinks
+WORKDIR /python-install/usr/local/bin
+RUN set -eux; \
+    ln -sf python3 python; \
+    ln -sf pip3 pip; \
+    ln -sf pydoc3 pydoc 2>/dev/null || true
+
+# =============================================================================
+# Stage 2: Final Distroless Python Image
+# =============================================================================
+FROM ${CC_IMAGE}:${TAG} AS python
+
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/app
+
+LABEL org.opencontainers.image.title="Distroless Python 3.8 (EOL)"
+LABEL org.opencontainers.image.description="CC image with Python 3.8 runtime - END OF LIFE"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+
+COPY --from=builder /python-install/usr/local /usr/local
+
+RUN ldconfig 2>/dev/null || true
+
+ENV LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/usr/local/bin:$PATH"
+
+USER ${UID}
+WORKDIR ${WORKDIR}
+
+ENTRYPOINT ["python3"]
+CMD ["--version"]

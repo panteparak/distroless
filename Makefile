@@ -48,6 +48,24 @@ test: ## Run container structure tests
 			--config tests/structure-tests/$$image.yaml || true; \
 	done
 
+test-python: ## Run Python structure tests
+	@echo "=== Running Python structure tests ==="
+	@for version in $(PYTHON_VERSIONS); do \
+		echo "Testing python:$$version..."; \
+		container-structure-test test \
+			--image $(REGISTRY)/$(IMAGE_PREFIX)/python:$$version-$(DEBIAN_VERSION) \
+			--config tests/structure-tests/python.yaml || true; \
+	done
+
+test-nodejs: ## Run Node.js structure tests
+	@echo "=== Running Node.js structure tests ==="
+	@for version in $(NODEJS_VERSIONS); do \
+		echo "Testing nodejs:$$version..."; \
+		container-structure-test test \
+			--image $(REGISTRY)/$(IMAGE_PREFIX)/nodejs:$$version-$(DEBIAN_VERSION) \
+			--config tests/structure-tests/nodejs.yaml || true; \
+	done
+
 # =============================================================================
 # Build targets
 # =============================================================================
