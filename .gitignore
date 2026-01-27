@@ -1,0 +1,40 @@
+# Build artifacts
+build/
+dist/
+*.tar
+*.tar.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Temporary files
+tmp/
+*.tmp
+*.log
+
+# Test artifacts
+test-results/
+coverage/
+
+# SBOM artifacts
+*.spdx.json
+*.cdx.json
+
+# Secrets (should never be committed)
+*.key
+*.pem
+!**/testdata/*.pem
+secrets/
+.env
+.env.*
