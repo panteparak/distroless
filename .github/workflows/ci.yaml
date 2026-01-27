@@ -4,8 +4,9 @@
 # Uses change detection to skip unchanged images and cascades dependencies.
 #
 # Image dependency chain:
-#   static → base → cc → python, nodejs
+#   static → base → cc → python, nodejs, golang:cgo
 #   static → base-nossl → java
+#   static → golang:static
 #
 # Triggers:
 #   - Push to main: Full build + push
@@ -50,6 +51,7 @@ jobs:
       python: ${{ steps.final.outputs.python }}
       nodejs: ${{ steps.final.outputs.nodejs }}
       java: ${{ steps.final.outputs.java }}
+      golang: ${{ steps.final.outputs.golang }}
       debug: ${{ steps.final.outputs.debug }}
       any_image: ${{ steps.final.outputs.any_image }}
     steps:
@@ -63,9 +65,10 @@ jobs:
             static:
               - 'images/static/**'
             base:
-              - 'images/base/**'
+              - 'images/base/Dockerfile'
+              - 'images/base/files/**'
             base_nossl:
-              - 'images/base-nossl/**'
+              - 'images/base/Dockerfile.nossl'
             cc:
               - 'images/cc/**'
             python:
@@ -74,6 +77,8 @@ jobs:
               - 'images/nodejs/**'
             java:
               - 'images/java/**'
+            golang:
+              - 'images/golang/**'
             debug:
               - 'images/debug/**'
             workflows:
@@ -91,12 +96,13 @@ jobs:
           PYTHON: ${{ steps.filter.outputs.python }}
           NODEJS: ${{ steps.filter.outputs.nodejs }}
           JAVA: ${{ steps.filter.outputs.java }}
+          GOLANG: ${{ steps.filter.outputs.golang }}
           DEBUG: ${{ steps.filter.outputs.debug }}
           WORKFLOWS: ${{ steps.filter.outputs.workflows }}
         run: |
           # PRs don't build images - only lint
           if [ "$IS_PR" == "true" ]; then
-            for img in static base base_nossl cc python nodejs java debug; do
+            for img in static base base_nossl cc python nodejs java golang debug; do
               echo "${img}=false" >> "$GITHUB_OUTPUT"
             done
             echo "any_image=false" >> "$GITHUB_OUTPUT"
@@ -105,7 +111,7 @@ jobs:
 
           # Force rebuild sets everything to true
           if [ "$FORCE" == "true" ]; then
-            for img in static base base_nossl cc python nodejs java debug; do
+            for img in static base base_nossl cc python nodejs java golang debug; do
               echo "${img}=true" >> "$GITHUB_OUTPUT"
             done
             echo "any_image=true" >> "$GITHUB_OUTPUT"
@@ -114,7 +120,7 @@ jobs:
 
           # Workflow changes trigger full rebuild
           if [ "$WORKFLOWS" == "true" ]; then
-            for img in static base base_nossl cc python nodejs java debug; do
+            for img in static base base_nossl cc python nodejs java golang debug; do
               echo "${img}=true" >> "$GITHUB_OUTPUT"
             done
             echo "any_image=true" >> "$GITHUB_OUTPUT"
@@ -129,12 +135,14 @@ jobs:
           P=$PYTHON
           N=$NODEJS
           J=$JAVA
+          G=$GOLANG
           D=$DEBUG
 
-          # static -> base, base-nossl
+          # static -> base, base-nossl, golang:static
           if [ "$S" == "true" ]; then
             B=true
             BN=true
+            G=true
           fi
 
           # base -> cc
@@ -142,10 +150,11 @@ jobs:
             C=true
           fi
 
-          # cc -> python, nodejs
+          # cc -> python, nodejs, golang:cgo
           if [ "$C" == "true" ]; then
             P=true
             N=true
+            G=true
           fi
 
           # base-nossl -> java
@@ -156,7 +165,7 @@ jobs:
           # Any image change triggers debug rebuild
           if [ "$S" == "true" ] || [ "$B" == "true" ] || [ "$BN" == "true" ] || \
              [ "$C" == "true" ] || [ "$P" == "true" ] || [ "$N" == "true" ] || \
-             [ "$J" == "true" ] || [ "$D" == "true" ]; then
+             [ "$J" == "true" ] || [ "$G" == "true" ] || [ "$D" == "true" ]; then
             D=true
           fi
 
@@ -167,11 +176,12 @@ jobs:
           echo "python=$P" >> "$GITHUB_OUTPUT"
           echo "nodejs=$N" >> "$GITHUB_OUTPUT"
           echo "java=$J" >> "$GITHUB_OUTPUT"
+          echo "golang=$G" >> "$GITHUB_OUTPUT"
           echo "debug=$D" >> "$GITHUB_OUTPUT"
 
           if [ "$S" == "true" ] || [ "$B" == "true" ] || [ "$BN" == "true" ] || \
              [ "$C" == "true" ] || [ "$P" == "true" ] || [ "$N" == "true" ] || \
-             [ "$J" == "true" ]; then
+             [ "$J" == "true" ] || [ "$G" == "true" ]; then
             echo "any_image=true" >> "$GITHUB_OUTPUT"
           else
             echo "any_image=false" >> "$GITHUB_OUTPUT"
@@ -299,8 +309,8 @@ jobs:
     uses: ./.github/workflows/_build-image.yaml
     with:
       image: base-nossl
-      dockerfile: images/base-nossl/Dockerfile
-      context: images/base-nossl
+      dockerfile: images/base/Dockerfile.nossl
+      context: images/base
       variant: root
     secrets: inherit
 
@@ -313,8 +323,8 @@ jobs:
     uses: ./.github/workflows/_build-image.yaml
     with:
       image: base-nossl
-      dockerfile: images/base-nossl/Dockerfile
-      context: images/base-nossl
+      dockerfile: images/base/Dockerfile.nossl
+      context: images/base
       variant: nonroot
     secrets: inherit
 
@@ -352,6 +362,72 @@ jobs:
   # ===========================================================================
   # TIER 4: LANGUAGE RUNTIMES (parallel within tier)
   # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Golang Static (depends on static) - 2 variants
+  # ---------------------------------------------------------------------------
+  build-golang-static-root:
+    needs: [detect-changes, build-static-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.golang == 'true' &&
+      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: golang
+      version: 'static'
+      dockerfile: images/golang/Dockerfile.static
+      context: images/golang
+      variant: root
+    secrets: inherit
+
+  build-golang-static-nonroot:
+    needs: [detect-changes, build-static-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.golang == 'true' &&
+      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: golang
+      version: 'static'
+      dockerfile: images/golang/Dockerfile.static
+      context: images/golang
+      variant: nonroot
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Golang CGO (depends on cc) - 2 variants
+  # ---------------------------------------------------------------------------
+  build-golang-cgo-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.golang == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: golang
+      version: 'cgo'
+      dockerfile: images/golang/Dockerfile.cgo
+      context: images/golang
+      variant: root
+    secrets: inherit
+
+  build-golang-cgo-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.golang == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: golang
+      version: 'cgo'
+      dockerfile: images/golang/Dockerfile.cgo
+      context: images/golang
+      variant: nonroot
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # Python (depends on cc) - 4 versions × 2 variants = 8 builds
@@ -711,6 +787,32 @@ jobs:
     secrets: inherit
 
   # Language runtime debug variants (latest versions only)
+  build-debug-golang-root:
+    needs: [detect-changes, build-golang-static-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-golang-static-root.result == 'success' || needs.build-golang-static-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: golang
+      version: 'static'
+      variant: root
+    secrets: inherit
+
+  build-debug-golang-nonroot:
+    needs: [detect-changes, build-golang-static-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-golang-static-nonroot.result == 'success' || needs.build-golang-static-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: golang
+      version: 'static'
+      variant: nonroot
+    secrets: inherit
+
   build-debug-python-root:
     needs: [detect-changes, build-python-3_13-root]
     if: |
@@ -798,6 +900,7 @@ jobs:
       - build-static-root
       - build-base-root
       - build-cc-root
+      - build-golang-static-root
       - build-python-3_13-root
       - build-nodejs-22-root
       - build-java-21-root
@@ -842,6 +945,13 @@ jobs:
             --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc:debian12 \
             --config tests/structure-tests/cc.yaml || true
 
+      - name: Test golang image
+        if: needs.build-golang-static-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/golang:static-debian12 \
+            --config tests/structure-tests/golang.yaml || true
+
       - name: Test python image
         if: needs.build-python-3_13-root.result == 'success'
         run: |
@@ -872,6 +982,7 @@ jobs:
       - build-static-root
       - build-base-root
       - build-cc-root
+      - build-golang-static-root
       - build-python-3_13-root
       - build-nodejs-22-root
       - build-java-21-root
@@ -915,6 +1026,12 @@ jobs:
           trivy image --exit-code 0 --severity HIGH,CRITICAL \
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc:debian12
 
+      - name: Scan golang image
+        if: needs.build-golang-static-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/golang:static-debian12
+
       - name: Scan python image
         if: needs.build-python-3_13-root.result == 'success'
         run: |
@@ -952,6 +1069,10 @@ jobs:
       - build-base-nossl-nonroot
       - build-cc-root
       - build-cc-nonroot
+      - build-golang-static-root
+      - build-golang-static-nonroot
+      - build-golang-cgo-root
+      - build-golang-cgo-nonroot
       - build-python-3_10-root
       - build-python-3_10-nonroot
       - build-python-3_11-root
@@ -976,6 +1097,8 @@ jobs:
       - build-debug-base-nonroot
       - build-debug-cc-root
       - build-debug-cc-nonroot
+      - build-debug-golang-root
+      - build-debug-golang-nonroot
       - build-debug-python-root
       - build-debug-python-nonroot
       - build-debug-nodejs-root
@@ -1009,6 +1132,8 @@ jobs:
           echo "| base | ${{ needs.build-base-root.result }} | ${{ needs.build-base-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| base-nossl | ${{ needs.build-base-nossl-root.result }} | ${{ needs.build-base-nossl-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| cc | ${{ needs.build-cc-root.result }} | ${{ needs.build-cc-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| golang:static | ${{ needs.build-golang-static-root.result }} | ${{ needs.build-golang-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| golang:cgo | ${{ needs.build-golang-cgo-root.result }} | ${{ needs.build-golang-cgo-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| python:3.10 | ${{ needs.build-python-3_10-root.result }} | ${{ needs.build-python-3_10-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| python:3.11 | ${{ needs.build-python-3_11-root.result }} | ${{ needs.build-python-3_11-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| python:3.12 | ${{ needs.build-python-3_12-root.result }} | ${{ needs.build-python-3_12-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
@@ -1026,6 +1151,7 @@ jobs:
           echo "| static | ${{ needs.build-debug-static-root.result }} | ${{ needs.build-debug-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| base | ${{ needs.build-debug-base-root.result }} | ${{ needs.build-debug-base-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| cc | ${{ needs.build-debug-cc-root.result }} | ${{ needs.build-debug-cc-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| golang:static | ${{ needs.build-debug-golang-root.result }} | ${{ needs.build-debug-golang-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| python:3.13 | ${{ needs.build-debug-python-root.result }} | ${{ needs.build-debug-python-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| nodejs:22 | ${{ needs.build-debug-nodejs-root.result }} | ${{ needs.build-debug-nodejs-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| java:21 | ${{ needs.build-debug-java-root.result }} | ${{ needs.build-debug-java-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"

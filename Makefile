@@ -10,6 +10,7 @@ PLATFORMS ?= linux/amd64,linux/arm64
 PYTHON_VERSIONS := 3.8 3.9 3.10 3.11 3.12 3.13
 NODEJS_VERSIONS := 20 22 24
 JAVA_VERSIONS := 17 21
+GOLANG_VARIANTS := static cgo
 
 # User variants
 USERS := root nonroot
@@ -73,6 +74,15 @@ test-java: ## Run Java structure tests
 		container-structure-test test \
 			--image $(REGISTRY)/$(IMAGE_PREFIX)/java:$$version-$(DEBIAN_VERSION) \
 			--config tests/structure-tests/java.yaml || true; \
+	done
+
+test-golang: ## Run Golang structure tests
+	@echo "=== Running Golang structure tests ==="
+	@for variant in $(GOLANG_VARIANTS); do \
+		echo "Testing golang:$$variant..."; \
+		container-structure-test test \
+			--image $(REGISTRY)/$(IMAGE_PREFIX)/golang:$$variant-$(DEBIAN_VERSION) \
+			--config tests/structure-tests/golang.yaml || true; \
 	done
 
 # =============================================================================
@@ -179,6 +189,41 @@ build-java: build-base ## Build Java images
 				-f images/java/Dockerfile.$$version \
 				images/java \
 				--load; \
+		done; \
+	done
+
+build-golang: build-static build-cc ## Build Golang images
+	@echo "=== Building Golang images ==="
+	@for variant in $(GOLANG_VARIANTS); do \
+		for user in $(USERS); do \
+			uid=0; workdir="/app"; \
+			if [ "$$user" = "nonroot" ]; then uid=65532; fi; \
+			echo "Building golang:$$variant-$$user"; \
+			if [ "$$variant" = "static" ]; then \
+				docker buildx build \
+					--platform $(PLATFORMS) \
+					--build-arg STATIC_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)/static \
+					--build-arg TAG=$(DEBIAN_VERSION)-$$user \
+					--build-arg USER=$$user \
+					--build-arg UID=$$uid \
+					--build-arg WORKDIR=$$workdir \
+					-t $(REGISTRY)/$(IMAGE_PREFIX)/golang:$$variant-$(DEBIAN_VERSION)-$$user \
+					-f images/golang/Dockerfile.$$variant \
+					images/golang \
+					--load; \
+			else \
+				docker buildx build \
+					--platform $(PLATFORMS) \
+					--build-arg CC_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)/cc \
+					--build-arg TAG=$(DEBIAN_VERSION)-$$user \
+					--build-arg USER=$$user \
+					--build-arg UID=$$uid \
+					--build-arg WORKDIR=$$workdir \
+					-t $(REGISTRY)/$(IMAGE_PREFIX)/golang:$$variant-$(DEBIAN_VERSION)-$$user \
+					-f images/golang/Dockerfile.$$variant \
+					images/golang \
+					--load; \
+			fi; \
 		done; \
 	done
 

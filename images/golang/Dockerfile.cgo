@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Go CGO Image
+# =============================================================================
+# Image for Go binaries that use CGO (C bindings)
+#
+# Use for: Go applications with CGO dependencies (sqlite, graphics, etc.)
+# Build your Go app normally: go build -ldflags="-s -w" ...
+#
+# Example multi-stage build:
+#   FROM golang:1.22 AS builder
+#   WORKDIR /app
+#   COPY . .
+#   RUN go build -ldflags="-s -w" -o /app/myapp .
+#
+#   FROM ghcr.io/panteparak/distroless/golang:cgo
+#   COPY --from=builder /app/myapp /app/myapp
+#   ENTRYPOINT ["/app/myapp"]
+# =============================================================================
+
+ARG CC_IMAGE=ghcr.io/panteparak/distroless/cc
+ARG TAG=debian12
+
+# =============================================================================
+# Final Go CGO Image
+# =============================================================================
+FROM ${CC_IMAGE}:${TAG}
+
+# Build arguments for user configuration
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/app
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Go CGO"
+LABEL org.opencontainers.image.description="Image for Go binaries with CGO dependencies"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+LABEL org.opencontainers.image.documentation="Use with CGO_ENABLED=1 go build"
+
+# Set timezone data path (Go may look for this)
+ENV ZONEINFO=/usr/share/zoneinfo
+
+USER ${UID}
+WORKDIR ${WORKDIR}
+
+# No entrypoint - user provides their Go binary
+ENTRYPOINT []
+CMD []
