@@ -1,0 +1,10 @@
+[project]
+name = "distroless-python-uv-example"
+version = "0.1.0"
+description = "Example Python application using UV with distroless"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
