@@ -41,6 +41,8 @@ jobs:
 
   build:
     needs: lint
+    # Only build on push/schedule - PRs can't access base images from GHCR yet
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
