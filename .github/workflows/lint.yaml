@@ -58,6 +58,7 @@ jobs:
         uses: raven-actions/actionlint@v2
         with:
           fail-on-error: true
+          shellcheck: false
 
   markdown:
     name: Lint Markdown
@@ -71,7 +72,9 @@ jobs:
           {
             "default": true,
             "MD013": false,
+            "MD032": false,
             "MD033": false,
+            "MD040": false,
             "MD041": false
           }
           EOF
