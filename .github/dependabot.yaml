@@ -1,0 +1,59 @@
+# Dependabot configuration for keeping dependencies up to date
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Docker images in Dockerfiles
+  - package-ecosystem: "docker"
+    directory: "/images/static"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/images/base"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/images/cc"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/images/python"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/images/nodejs"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/images/java"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"

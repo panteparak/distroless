@@ -1,0 +1,41 @@
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# IDE
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+
+# Tests
+tests/
+*_test.go
+*_test.py
+
+# Other images (when building specific image)
+# Uncomment as needed during builds
+# images/static/
+# images/base/
+# images/cc/
+# images/python/
+# images/nodejs/
+# images/java/
+
+# Examples
+examples/
+
+# OS
+.DS_Store
+Thumbs.db
