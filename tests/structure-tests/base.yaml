@@ -1,0 +1,46 @@
+# Container Structure Tests for Base Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  # Inherited from static
+  - name: "CA certificates exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+  - name: "passwd file exists"
+    path: "/etc/passwd"
+    shouldExist: true
+
+  # libc libraries
+  - name: "libc.so.6 exists"
+    path: "/lib/x86_64-linux-gnu/libc.so.6"
+    shouldExist: true
+
+  # OpenSSL libraries (debian12)
+  - name: "libssl.so.3 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    shouldExist: true
+
+  - name: "libcrypto.so.3 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
+    shouldExist: true
+
+  # No shell (distroless)
+  - name: "No shell exists"
+    path: "/bin/sh"
+    shouldExist: false
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "PATH"
+      value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    - key: "SSL_CERT_FILE"
+      value: "/etc/ssl/certs/ca-certificates.crt"

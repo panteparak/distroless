@@ -1,0 +1,53 @@
+# Container Structure Tests for CC Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  # Inherited from base
+  - name: "CA certificates exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+  - name: "libc.so.6 exists"
+    path: "/lib/x86_64-linux-gnu/libc.so.6"
+    shouldExist: true
+
+  - name: "libssl.so.3 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    shouldExist: true
+
+  # C++ runtime libraries
+  - name: "libstdc++.so.6 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libstdc++.so.6"
+    shouldExist: true
+
+  - name: "libgcc_s.so.1 exists"
+    path: "/lib/x86_64-linux-gnu/libgcc_s.so.1"
+    shouldExist: true
+
+  - name: "libgomp.so.1 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libgomp.so.1"
+    shouldExist: true
+
+  # No shell (distroless)
+  - name: "No shell exists"
+    path: "/bin/sh"
+    shouldExist: false
+
+  - name: "No apt exists"
+    path: "/usr/bin/apt"
+    shouldExist: false
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "PATH"
+      value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    - key: "SSL_CERT_FILE"
+      value: "/etc/ssl/certs/ca-certificates.crt"

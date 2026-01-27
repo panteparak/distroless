@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Base NoSSL Image
+# =============================================================================
+# Static image + glibc only (no OpenSSL)
+#
+# Use for: Java applications (JRE includes its own SSL implementation)
+# =============================================================================
+
+ARG STATIC_IMAGE=ghcr.io/panteparak/distroless/static
+ARG TAG=debian12
+ARG DEBIAN_VERSION=bookworm
+
+# =============================================================================
+# Stage 1: Package Extractor
+# =============================================================================
+FROM debian:${DEBIAN_VERSION}-slim AS extractor
+
+ARG DEBIAN_VERSION
+ARG TARGETARCH
+
+WORKDIR /extract
+
+# Download and extract only libc (no SSL)
+RUN apt-get update && \
+    cd /var/cache/apt/archives && \
+    apt-get download libc6 && \
+    mkdir -p /extract/rootfs && \
+    for deb in *.deb; do \
+        dpkg-deb -x "$deb" /extract/rootfs; \
+    done
+
+# Clean up unnecessary files
+RUN rm -rf /extract/rootfs/usr/share/doc/* \
+    /extract/rootfs/usr/share/man/* \
+    /extract/rootfs/var/lib/dpkg/* \
+    2>/dev/null || true
+
+# =============================================================================
+# Stage 2: Final Base NoSSL Image
+# =============================================================================
+FROM ${STATIC_IMAGE}:${TAG} AS base-nossl
+
+# Build arguments for user configuration
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Base NoSSL"
+LABEL org.opencontainers.image.description="Static image with glibc only (no OpenSSL)"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+
+# Copy library files from extractor
+COPY --from=extractor /extract/rootfs/lib/ /lib/
+COPY --from=extractor /extract/rootfs/usr/lib/ /usr/lib/
+
+USER ${UID}
+WORKDIR ${WORKDIR}
