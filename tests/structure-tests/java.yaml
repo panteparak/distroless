@@ -1,0 +1,83 @@
+# Container Structure Tests for Java Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  # Inherited from base-nossl
+  - name: "CA certificates exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+  - name: "libc.so.6 exists"
+    path: "/lib/x86_64-linux-gnu/libc.so.6"
+    shouldExist: true
+
+  # Java binaries
+  - name: "java binary exists"
+    path: "/opt/java/bin/java"
+    shouldExist: true
+
+  - name: "keytool exists"
+    path: "/opt/java/bin/keytool"
+    shouldExist: true
+
+  # Java lib directory
+  - name: "Java lib directory exists"
+    path: "/opt/java/lib"
+    shouldExist: true
+
+  # Font support
+  - name: "DejaVu fonts exist"
+    path: "/usr/share/fonts/truetype/dejavu"
+    shouldExist: true
+
+  - name: "fontconfig exists"
+    path: "/etc/fonts/fonts.conf"
+    shouldExist: true
+
+  # No shell (distroless)
+  - name: "No shell exists"
+    path: "/bin/sh"
+    shouldExist: false
+
+  - name: "No apt exists"
+    path: "/usr/bin/apt"
+    shouldExist: false
+
+  # No SSL libs (uses Java's built-in)
+  - name: "No libssl"
+    path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    shouldExist: false
+
+# =============================================================================
+# Command Tests
+# =============================================================================
+commandTests:
+  - name: "Java version check"
+    command: "java"
+    args: ["-version"]
+    expectedError: ["(17|21)\\."]
+    exitCode: 0
+
+  - name: "Java can list system properties"
+    command: "java"
+    args: ["-XshowSettings:system", "-version"]
+    expectedError: ["Operating System Metrics"]
+    exitCode: 0
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "JAVA_HOME"
+      value: "/opt/java"
+    - key: "PATH"
+      value: "/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  entrypoint: ["java"]
+  cmd: ["-version"]
+  workdir: "/app"

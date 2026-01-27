@@ -1,0 +1,126 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Java 17 Image (Temurin JRE)
+# =============================================================================
+# Base-nossl image + Eclipse Temurin JRE 17
+#
+# Use for: Java applications, Spring Boot, Quarkus, Micronaut
+# Note: Uses base-nossl since Java includes its own SSL implementation
+# =============================================================================
+
+ARG BASE_IMAGE=ghcr.io/panteparak/distroless/base-nossl
+ARG TAG=debian12
+ARG DEBIAN_VERSION=bookworm
+
+# =============================================================================
+# Stage 1: Package Extractor (for Java dependencies)
+# =============================================================================
+FROM debian:${DEBIAN_VERSION}-slim AS extractor
+
+ARG DEBIAN_VERSION
+
+WORKDIR /extract/debs
+
+# Download Java runtime dependencies (fonts, graphics libs)
+RUN apt-get update && \
+    apt-get download \
+        zlib1g \
+        libjpeg62-turbo \
+        liblcms2-2 \
+        libfreetype6 \
+        fonts-dejavu-core \
+        fontconfig-config \
+        libfontconfig1 \
+        libexpat1 \
+        libuuid1 \
+        libbrotli1 \
+        libpng16-16 \
+        libharfbuzz0b \
+        libgraphite2-3 \
+    && \
+    mkdir -p /extract/rootfs && \
+    for deb in *.deb; do \
+        dpkg-deb -x "$deb" /extract/rootfs; \
+    done
+
+# Clean up unnecessary files
+RUN rm -rf /extract/rootfs/usr/share/doc/* \
+    /extract/rootfs/usr/share/man/* \
+    /extract/rootfs/var/lib/dpkg/* \
+    2>/dev/null || true
+
+# =============================================================================
+# Stage 2: JRE Downloader
+# =============================================================================
+FROM debian:${DEBIAN_VERSION}-slim AS jre-downloader
+
+ARG TARGETARCH
+
+WORKDIR /jre
+
+# Install download tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set pipefail for RUN commands with pipes
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Download and verify Temurin JRE 17
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) \
+            JRE_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.18%2B8/OpenJDK17U-jre_x64_linux_hotspot_17.0.18_8.tar.gz"; \
+            JRE_SHA256="8b418e38cca87945858ae911988401720095eb671357d47437b4adb49c28dcab"; \
+            ;; \
+        arm64) \
+            JRE_URL="https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.17%2B10/OpenJDK17U-jre_aarch64_linux_hotspot_17.0.17_10.tar.gz"; \
+            JRE_SHA256="d184e8d5caabe51b7ce9d4e0410f51b447a703eab3cec60ca94b7c59fecdad01"; \
+            ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac; \
+    curl -fsSL -o jre.tar.gz "${JRE_URL}"; \
+    echo "${JRE_SHA256} *jre.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/java; \
+    tar -xzf jre.tar.gz --strip-components=1 -C /opt/java; \
+    rm jre.tar.gz; \
+    # Remove unnecessary files
+    rm -rf /opt/java/man /opt/java/legal
+
+# =============================================================================
+# Stage 3: Final Distroless Java Image
+# =============================================================================
+FROM ${BASE_IMAGE}:${TAG} AS java
+
+# Build arguments for user configuration
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/app
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Java 17"
+LABEL org.opencontainers.image.description="Base-nossl image with Temurin JRE 17"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+
+# Copy Java dependencies
+COPY --from=extractor /extract/rootfs/lib/ /lib/
+COPY --from=extractor /extract/rootfs/usr/lib/ /usr/lib/
+COPY --from=extractor /extract/rootfs/usr/share/fonts /usr/share/fonts
+COPY --from=extractor /extract/rootfs/etc/fonts /etc/fonts
+
+# Copy JRE
+COPY --from=jre-downloader /opt/java /opt/java
+
+# Environment variables
+ENV JAVA_HOME=/opt/java \
+    PATH="/opt/java/bin:$PATH" \
+    JAVA_VERSION=17
+
+USER ${UID}
+WORKDIR ${WORKDIR}
+
+# Default to java command
+ENTRYPOINT ["java"]
+CMD ["-version"]
