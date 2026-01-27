@@ -253,7 +253,7 @@ jobs:
   # Summary
   # ===========================================================================
   summary:
-    needs: [debug-base, debug-runtimes]
+    needs: [static-root, base-root, cc-root, python, nodejs, java, debug-base, debug-runtimes]
     if: always()
     runs-on: ubuntu-latest
     steps:
