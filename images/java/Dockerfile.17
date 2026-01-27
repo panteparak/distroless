@@ -20,11 +20,10 @@ FROM debian:${DEBIAN_VERSION}-slim AS extractor
 
 ARG DEBIAN_VERSION
 
-WORKDIR /extract
+WORKDIR /extract/debs
 
 # Download Java runtime dependencies (fonts, graphics libs)
 RUN apt-get update && \
-    cd /var/cache/apt/archives && \
     apt-get download \
         zlib1g \
         libjpeg62-turbo \
