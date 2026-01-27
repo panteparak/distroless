@@ -1,0 +1,157 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Python 3.10 Image
+# =============================================================================
+# CC image + Python 3.10 runtime compiled from source
+#
+# Use for: Python applications, Django, Flask, FastAPI, data science
+# =============================================================================
+
+ARG CC_IMAGE=ghcr.io/panteparak/distroless/cc
+ARG TAG=debian12
+ARG DEBIAN_VERSION=bookworm
+
+# =============================================================================
+# Stage 1: Python Builder
+# =============================================================================
+FROM debian:${DEBIAN_VERSION}-slim AS builder
+
+ARG TARGETARCH
+
+# Python version configuration
+ENV PYTHON_VERSION=3.10.19
+ENV PYTHON_SHA256=c8f4a596572201d81dd7df91f70e177e19a70f1d489968b54b5fbbf29a97c076
+ENV GPG_KEY=A035C8C19219BA821ECEA86B64E628F8D684696D
+
+# Prevent Python from writing bytecode and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    dpkg-dev \
+    gcc \
+    gnupg \
+    libbluetooth-dev \
+    libbz2-dev \
+    libc6-dev \
+    libdb-dev \
+    libexpat1-dev \
+    libffi-dev \
+    libgdbm-dev \
+    liblzma-dev \
+    libncursesw5-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    make \
+    tk-dev \
+    uuid-dev \
+    wget \
+    xz-utils \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and verify Python source
+RUN set -eux; \
+    wget -O python.tar.xz "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"; \
+    wget -O python.tar.xz.asc "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz.asc"; \
+    GNUPGHOME="$(mktemp -d)"; \
+    export GNUPGHOME; \
+    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$GPG_KEY"; \
+    gpg --batch --verify python.tar.xz.asc python.tar.xz; \
+    gpgconf --kill all; \
+    rm -rf "$GNUPGHOME" python.tar.xz.asc; \
+    echo "$PYTHON_SHA256 *python.tar.xz" | sha256sum -c -; \
+    mkdir -p /usr/src/python; \
+    tar --extract --directory /usr/src/python --strip-components=1 --file python.tar.xz; \
+    rm python.tar.xz
+
+# Compile Python with optimizations
+RUN set -eux; \
+    cd /usr/src/python; \
+    gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
+    ./configure \
+        --build="$gnuArch" \
+        --enable-loadable-sqlite-extensions \
+        --enable-optimizations \
+        --enable-option-checking=fatal \
+        --enable-shared \
+        --with-lto \
+        --with-ensurepip \
+    ; \
+    nproc="$(nproc)"; \
+    EXTRA_CFLAGS="$(dpkg-buildflags --get CFLAGS)"; \
+    LDFLAGS="$(dpkg-buildflags --get LDFLAGS)"; \
+    LDFLAGS="${LDFLAGS:--Wl},--strip-all"; \
+    make -j "$nproc" \
+        "EXTRA_CFLAGS=${EXTRA_CFLAGS:-}" \
+        "LDFLAGS=${LDFLAGS:-}" \
+    ; \
+    make install DESTDIR=/python-install; \
+    cd /; \
+    rm -rf /usr/src/python
+
+# Clean up Python installation
+RUN set -eux; \
+    # Remove unnecessary files
+    find /python-install -depth \
+        \( \
+            \( -type d -a \( -name test -o -name tests -o -name idle_test \) \) \
+            -o \( -type f -a \( -name '*.pyc' -o -name '*.pyo' -o -name 'libpython*.a' \) \) \
+        \) -exec rm -rf '{}' + \
+    ; \
+    # Remove __pycache__ directories
+    find /python-install -type d -name '__pycache__' -exec rm -rf '{}' + 2>/dev/null || true; \
+    # Remove pip cache
+    rm -rf /python-install/root/.cache; \
+    # Remove unnecessary binaries (keep python3, pip3)
+    rm -f /python-install/usr/local/bin/2to3* \
+          /python-install/usr/local/bin/idle* \
+          /python-install/usr/local/bin/pydoc*
+
+# Create symlinks
+RUN set -eux; \
+    cd /python-install/usr/local/bin; \
+    ln -sf python3 python; \
+    ln -sf pip3 pip; \
+    ln -sf pydoc3 pydoc 2>/dev/null || true
+
+# =============================================================================
+# Stage 2: Final Distroless Python Image
+# =============================================================================
+FROM ${CC_IMAGE}:${TAG} AS python
+
+# Build arguments for user configuration
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/app
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Python 3.10"
+LABEL org.opencontainers.image.description="CC image with Python 3.10 runtime"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+
+# Copy Python installation
+COPY --from=builder /python-install/usr/local /usr/local
+
+# Run ldconfig to update library cache
+RUN ldconfig 2>/dev/null || true
+
+# Environment variables
+ENV LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/usr/local/bin:$PATH"
+
+USER ${UID}
+WORKDIR ${WORKDIR}
+
+# Default to Python interpreter
+ENTRYPOINT ["python3"]
+CMD ["--version"]

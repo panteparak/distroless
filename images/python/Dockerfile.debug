@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Python Debug Image
+# =============================================================================
+# Adds BusyBox shell to the Python image for debugging.
+#
+# Usage:
+#   docker build --build-arg PYTHON_VERSION=3.13 --build-arg TAG=debian12 \
+#     -f Dockerfile.debug -t python:3.13-debug .
+# =============================================================================
+
+ARG BASE_IMAGE=ghcr.io/panteparak/distroless/python
+ARG PYTHON_VERSION=3.13
+ARG TAG=debian12
+
+# =============================================================================
+# Stage 1: Get BusyBox
+# =============================================================================
+FROM debian:bookworm-slim AS busybox
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    busybox-static \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /busybox \
+    && cp /bin/busybox /busybox/busybox \
+    && chmod +x /busybox/busybox \
+    && /busybox/busybox --install -s /busybox
+
+# =============================================================================
+# Stage 2: Final Debug Image
+# =============================================================================
+FROM ${BASE_IMAGE}:${PYTHON_VERSION}-${TAG}
+
+LABEL org.opencontainers.image.title="Distroless Python Debug"
+LABEL org.opencontainers.image.description="Python image with BusyBox for debugging"
+
+COPY --from=busybox /busybox /busybox
+
+ENV PATH="$PATH:/busybox"
+
+ENTRYPOINT ["/busybox/sh"]
