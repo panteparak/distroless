@@ -32,6 +32,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
+# Set shell with pipefail for proper error handling in pipelines
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -61,8 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Download and verify Python source
 RUN set -eux; \
-    wget -O python.tar.xz "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"; \
-    wget -O python.tar.xz.asc "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz.asc"; \
+    wget -q -O python.tar.xz "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"; \
+    wget -q -O python.tar.xz.asc "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz.asc"; \
     GNUPGHOME="$(mktemp -d)"; \
     export GNUPGHOME; \
     gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$GPG_KEY"; \
@@ -74,8 +77,8 @@ RUN set -eux; \
     rm python.tar.xz
 
 # Compile Python with optimizations
+WORKDIR /usr/src/python
 RUN set -eux; \
-    cd /usr/src/python; \
     gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"; \
     ./configure \
         --build="$gnuArch" \
@@ -95,7 +98,6 @@ RUN set -eux; \
         "LDFLAGS=${LDFLAGS:-}" \
     ; \
     make install DESTDIR=/python-install; \
-    cd /; \
     rm -rf /usr/src/python
 
 # Clean up Python installation
@@ -113,8 +115,8 @@ RUN set -eux; \
           /python-install/usr/local/bin/pydoc*
 
 # Create symlinks
+WORKDIR /python-install/usr/local/bin
 RUN set -eux; \
-    cd /python-install/usr/local/bin; \
     ln -sf python3 python; \
     ln -sf pip3 pip; \
     ln -sf pydoc3 pydoc 2>/dev/null || true
