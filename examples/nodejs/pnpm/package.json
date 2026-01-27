@@ -1,0 +1,13 @@
+{
+  "name": "distroless-nodejs-pnpm-example",
+  "version": "1.0.0",
+  "description": "Example Node.js application using pnpm with distroless",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}

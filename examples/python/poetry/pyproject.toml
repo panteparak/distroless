@@ -1,0 +1,12 @@
+[tool.poetry]
+name = "distroless-python-poetry-example"
+version = "0.1.0"
+description = "Example Python application using Poetry with distroless"
+authors = ["Example <example@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
