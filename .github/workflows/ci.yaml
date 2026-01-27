@@ -1,0 +1,1038 @@
+# Unified CI Workflow
+# ====================
+# Single workflow that handles all CI tasks: lint, build, test, security scan
+# Uses change detection to skip unchanged images and cascades dependencies.
+#
+# Image dependency chain:
+#   static → base → cc → python, nodejs
+#   static → base-nossl → java
+#
+# Triggers:
+#   - Push to main: Full build + push
+#   - Pull requests: Lint only (no registry push)
+#   - Weekly schedule: Force rebuild all
+#   - Manual dispatch: Optional force rebuild
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly Sunday midnight UTC
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild all images (ignore change detection)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/distroless
+
+jobs:
+  # ===========================================================================
+  # CHANGE DETECTION
+  # ===========================================================================
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      static: ${{ steps.final.outputs.static }}
+      base: ${{ steps.final.outputs.base }}
+      base_nossl: ${{ steps.final.outputs.base_nossl }}
+      cc: ${{ steps.final.outputs.cc }}
+      python: ${{ steps.final.outputs.python }}
+      nodejs: ${{ steps.final.outputs.nodejs }}
+      java: ${{ steps.final.outputs.java }}
+      debug: ${{ steps.final.outputs.debug }}
+      any_image: ${{ steps.final.outputs.any_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            static:
+              - 'images/static/**'
+            base:
+              - 'images/base/**'
+            base_nossl:
+              - 'images/base-nossl/**'
+            cc:
+              - 'images/cc/**'
+            python:
+              - 'images/python/**'
+            nodejs:
+              - 'images/nodejs/**'
+            java:
+              - 'images/java/**'
+            debug:
+              - 'images/debug/**'
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Calculate cascading changes
+        id: final
+        env:
+          FORCE: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          STATIC: ${{ steps.filter.outputs.static }}
+          BASE: ${{ steps.filter.outputs.base }}
+          BASE_NOSSL: ${{ steps.filter.outputs.base_nossl }}
+          CC: ${{ steps.filter.outputs.cc }}
+          PYTHON: ${{ steps.filter.outputs.python }}
+          NODEJS: ${{ steps.filter.outputs.nodejs }}
+          JAVA: ${{ steps.filter.outputs.java }}
+          DEBUG: ${{ steps.filter.outputs.debug }}
+          WORKFLOWS: ${{ steps.filter.outputs.workflows }}
+        run: |
+          # PRs don't build images - only lint
+          if [ "$IS_PR" == "true" ]; then
+            for img in static base base_nossl cc python nodejs java debug; do
+              echo "${img}=false" >> "$GITHUB_OUTPUT"
+            done
+            echo "any_image=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Force rebuild sets everything to true
+          if [ "$FORCE" == "true" ]; then
+            for img in static base base_nossl cc python nodejs java debug; do
+              echo "${img}=true" >> "$GITHUB_OUTPUT"
+            done
+            echo "any_image=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Workflow changes trigger full rebuild
+          if [ "$WORKFLOWS" == "true" ]; then
+            for img in static base base_nossl cc python nodejs java debug; do
+              echo "${img}=true" >> "$GITHUB_OUTPUT"
+            done
+            echo "any_image=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Cascade dependencies
+          S=$STATIC
+          B=$BASE
+          BN=$BASE_NOSSL
+          C=$CC
+          P=$PYTHON
+          N=$NODEJS
+          J=$JAVA
+          D=$DEBUG
+
+          # static -> base, base-nossl
+          if [ "$S" == "true" ]; then
+            B=true
+            BN=true
+          fi
+
+          # base -> cc
+          if [ "$B" == "true" ]; then
+            C=true
+          fi
+
+          # cc -> python, nodejs
+          if [ "$C" == "true" ]; then
+            P=true
+            N=true
+          fi
+
+          # base-nossl -> java
+          if [ "$BN" == "true" ]; then
+            J=true
+          fi
+
+          # Any image change triggers debug rebuild
+          if [ "$S" == "true" ] || [ "$B" == "true" ] || [ "$BN" == "true" ] || \
+             [ "$C" == "true" ] || [ "$P" == "true" ] || [ "$N" == "true" ] || \
+             [ "$J" == "true" ] || [ "$D" == "true" ]; then
+            D=true
+          fi
+
+          echo "static=$S" >> "$GITHUB_OUTPUT"
+          echo "base=$B" >> "$GITHUB_OUTPUT"
+          echo "base_nossl=$BN" >> "$GITHUB_OUTPUT"
+          echo "cc=$C" >> "$GITHUB_OUTPUT"
+          echo "python=$P" >> "$GITHUB_OUTPUT"
+          echo "nodejs=$N" >> "$GITHUB_OUTPUT"
+          echo "java=$J" >> "$GITHUB_OUTPUT"
+          echo "debug=$D" >> "$GITHUB_OUTPUT"
+
+          if [ "$S" == "true" ] || [ "$B" == "true" ] || [ "$BN" == "true" ] || \
+             [ "$C" == "true" ] || [ "$P" == "true" ] || [ "$N" == "true" ] || \
+             [ "$J" == "true" ]; then
+            echo "any_image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any_image=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ===========================================================================
+  # LINT (parallel, always runs)
+  # ===========================================================================
+  lint-dockerfiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Dockerfiles
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          recursive: true
+          ignore: DL3008,DL3013,DL3018,DL3003
+          failure-threshold: error
+
+  lint-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint shell scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+
+  lint-yaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint YAML files
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_data: |
+            extends: relaxed
+            rules:
+              line-length:
+                max: 200
+
+  lint-actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint GitHub Actions
+        uses: raven-actions/actionlint@v2
+        with:
+          fail-on-error: true
+          shellcheck: false
+
+  lint-markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: '**/*.md'
+          config: |
+            { "MD013": false, "MD033": false, "MD041": false }
+
+  # ===========================================================================
+  # TIER 1: STATIC (foundation layer)
+  # ===========================================================================
+  build-static-root:
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.static == 'true'
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: static
+      dockerfile: images/static/Dockerfile
+      context: images/static
+      variant: root
+    secrets: inherit
+
+  build-static-nonroot:
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.static == 'true'
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: static
+      dockerfile: images/static/Dockerfile
+      context: images/static
+      variant: nonroot
+    secrets: inherit
+
+  # ===========================================================================
+  # TIER 2: BASE VARIANTS (depends on static)
+  # ===========================================================================
+  build-base-root:
+    needs: [detect-changes, build-static-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.base == 'true' &&
+      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: base
+      dockerfile: images/base/Dockerfile
+      context: images/base
+      variant: root
+    secrets: inherit
+
+  build-base-nonroot:
+    needs: [detect-changes, build-static-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.base == 'true' &&
+      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: base
+      dockerfile: images/base/Dockerfile
+      context: images/base
+      variant: nonroot
+    secrets: inherit
+
+  build-base-nossl-root:
+    needs: [detect-changes, build-static-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.base_nossl == 'true' &&
+      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: base-nossl
+      dockerfile: images/base-nossl/Dockerfile
+      context: images/base-nossl
+      variant: root
+    secrets: inherit
+
+  build-base-nossl-nonroot:
+    needs: [detect-changes, build-static-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.base_nossl == 'true' &&
+      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: base-nossl
+      dockerfile: images/base-nossl/Dockerfile
+      context: images/base-nossl
+      variant: nonroot
+    secrets: inherit
+
+  # ===========================================================================
+  # TIER 3: CC (depends on base)
+  # ===========================================================================
+  build-cc-root:
+    needs: [detect-changes, build-base-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.cc == 'true' &&
+      (needs.build-base-root.result == 'success' || needs.build-base-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: cc
+      dockerfile: images/cc/Dockerfile
+      context: images/cc
+      variant: root
+    secrets: inherit
+
+  build-cc-nonroot:
+    needs: [detect-changes, build-base-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.cc == 'true' &&
+      (needs.build-base-nonroot.result == 'success' || needs.build-base-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: cc
+      dockerfile: images/cc/Dockerfile
+      context: images/cc
+      variant: nonroot
+    secrets: inherit
+
+  # ===========================================================================
+  # TIER 4: LANGUAGE RUNTIMES (parallel within tier)
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Python (depends on cc) - 4 versions × 2 variants = 8 builds
+  # ---------------------------------------------------------------------------
+  build-python-3_10-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.10'
+      dockerfile: images/python/Dockerfile.3.10
+      context: images/python
+      variant: root
+    secrets: inherit
+
+  build-python-3_10-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.10'
+      dockerfile: images/python/Dockerfile.3.10
+      context: images/python
+      variant: nonroot
+    secrets: inherit
+
+  build-python-3_11-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.11'
+      dockerfile: images/python/Dockerfile.3.11
+      context: images/python
+      variant: root
+    secrets: inherit
+
+  build-python-3_11-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.11'
+      dockerfile: images/python/Dockerfile.3.11
+      context: images/python
+      variant: nonroot
+    secrets: inherit
+
+  build-python-3_12-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.12'
+      dockerfile: images/python/Dockerfile.3.12
+      context: images/python
+      variant: root
+    secrets: inherit
+
+  build-python-3_12-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.12'
+      dockerfile: images/python/Dockerfile.3.12
+      context: images/python
+      variant: nonroot
+    secrets: inherit
+
+  build-python-3_13-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.13'
+      dockerfile: images/python/Dockerfile.3.13
+      context: images/python
+      variant: root
+    secrets: inherit
+
+  build-python-3_13-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.python == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: python
+      version: '3.13'
+      dockerfile: images/python/Dockerfile.3.13
+      context: images/python
+      variant: nonroot
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Node.js (depends on cc) - 3 versions × 2 variants = 6 builds
+  # ---------------------------------------------------------------------------
+  build-nodejs-20-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.nodejs == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: nodejs
+      version: '20'
+      dockerfile: images/nodejs/Dockerfile.20
+      context: images/nodejs
+      variant: root
+    secrets: inherit
+
+  build-nodejs-20-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.nodejs == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: nodejs
+      version: '20'
+      dockerfile: images/nodejs/Dockerfile.20
+      context: images/nodejs
+      variant: nonroot
+    secrets: inherit
+
+  build-nodejs-22-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.nodejs == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: nodejs
+      version: '22'
+      dockerfile: images/nodejs/Dockerfile.22
+      context: images/nodejs
+      variant: root
+    secrets: inherit
+
+  build-nodejs-22-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.nodejs == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: nodejs
+      version: '22'
+      dockerfile: images/nodejs/Dockerfile.22
+      context: images/nodejs
+      variant: nonroot
+    secrets: inherit
+
+  build-nodejs-24-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.nodejs == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: nodejs
+      version: '24'
+      dockerfile: images/nodejs/Dockerfile.24
+      context: images/nodejs
+      variant: root
+    secrets: inherit
+
+  build-nodejs-24-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.nodejs == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: nodejs
+      version: '24'
+      dockerfile: images/nodejs/Dockerfile.24
+      context: images/nodejs
+      variant: nonroot
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Java (depends on base-nossl) - 2 versions × 2 variants = 4 builds
+  # ---------------------------------------------------------------------------
+  build-java-17-root:
+    needs: [detect-changes, build-base-nossl-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.java == 'true' &&
+      (needs.build-base-nossl-root.result == 'success' || needs.build-base-nossl-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: java
+      version: '17'
+      dockerfile: images/java/Dockerfile.17
+      context: images/java
+      variant: root
+    secrets: inherit
+
+  build-java-17-nonroot:
+    needs: [detect-changes, build-base-nossl-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.java == 'true' &&
+      (needs.build-base-nossl-nonroot.result == 'success' || needs.build-base-nossl-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: java
+      version: '17'
+      dockerfile: images/java/Dockerfile.17
+      context: images/java
+      variant: nonroot
+    secrets: inherit
+
+  build-java-21-root:
+    needs: [detect-changes, build-base-nossl-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.java == 'true' &&
+      (needs.build-base-nossl-root.result == 'success' || needs.build-base-nossl-root.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: java
+      version: '21'
+      dockerfile: images/java/Dockerfile.21
+      context: images/java
+      variant: root
+    secrets: inherit
+
+  build-java-21-nonroot:
+    needs: [detect-changes, build-base-nossl-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.java == 'true' &&
+      (needs.build-base-nossl-nonroot.result == 'success' || needs.build-base-nossl-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-image.yaml
+    with:
+      image: java
+      version: '21'
+      dockerfile: images/java/Dockerfile.21
+      context: images/java
+      variant: nonroot
+    secrets: inherit
+
+  # ===========================================================================
+  # TIER 5: DEBUG VARIANTS
+  # ===========================================================================
+  # Build debug variants for base images and latest runtime versions
+
+  # Base image debug variants
+  build-debug-static-root:
+    needs: [detect-changes, build-static-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: static
+      variant: root
+    secrets: inherit
+
+  build-debug-static-nonroot:
+    needs: [detect-changes, build-static-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: static
+      variant: nonroot
+    secrets: inherit
+
+  build-debug-base-root:
+    needs: [detect-changes, build-base-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-base-root.result == 'success' || needs.build-base-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: base
+      variant: root
+    secrets: inherit
+
+  build-debug-base-nonroot:
+    needs: [detect-changes, build-base-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-base-nonroot.result == 'success' || needs.build-base-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: base
+      variant: nonroot
+    secrets: inherit
+
+  build-debug-cc-root:
+    needs: [detect-changes, build-cc-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: cc
+      variant: root
+    secrets: inherit
+
+  build-debug-cc-nonroot:
+    needs: [detect-changes, build-cc-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: cc
+      variant: nonroot
+    secrets: inherit
+
+  # Language runtime debug variants (latest versions only)
+  build-debug-python-root:
+    needs: [detect-changes, build-python-3_13-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-python-3_13-root.result == 'success' || needs.build-python-3_13-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: python
+      version: '3.13'
+      variant: root
+    secrets: inherit
+
+  build-debug-python-nonroot:
+    needs: [detect-changes, build-python-3_13-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-python-3_13-nonroot.result == 'success' || needs.build-python-3_13-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: python
+      version: '3.13'
+      variant: nonroot
+    secrets: inherit
+
+  build-debug-nodejs-root:
+    needs: [detect-changes, build-nodejs-22-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-nodejs-22-root.result == 'success' || needs.build-nodejs-22-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: nodejs
+      version: '22'
+      variant: root
+    secrets: inherit
+
+  build-debug-nodejs-nonroot:
+    needs: [detect-changes, build-nodejs-22-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-nodejs-22-nonroot.result == 'success' || needs.build-nodejs-22-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: nodejs
+      version: '22'
+      variant: nonroot
+    secrets: inherit
+
+  build-debug-java-root:
+    needs: [detect-changes, build-java-21-root]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-java-21-root.result == 'success' || needs.build-java-21-root.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: java
+      version: '21'
+      variant: root
+    secrets: inherit
+
+  build-debug-java-nonroot:
+    needs: [detect-changes, build-java-21-nonroot]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.debug == 'true' &&
+      (needs.build-java-21-nonroot.result == 'success' || needs.build-java-21-nonroot.result == 'skipped')
+    uses: ./.github/workflows/_build-debug.yaml
+    with:
+      image: java
+      version: '21'
+      variant: nonroot
+    secrets: inherit
+
+  # ===========================================================================
+  # TESTS (after builds complete)
+  # ===========================================================================
+  test:
+    needs:
+      - detect-changes
+      - build-static-root
+      - build-base-root
+      - build-cc-root
+      - build-python-3_13-root
+      - build-nodejs-22-root
+      - build-java-21-root
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.any_image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install container-structure-test
+        run: |
+          curl -LO https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64
+          chmod +x container-structure-test-linux-amd64
+          sudo mv container-structure-test-linux-amd64 /usr/local/bin/container-structure-test
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test static image
+        if: needs.build-static-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/static:debian12 \
+            --config tests/structure-tests/static.yaml || true
+
+      - name: Test base image
+        if: needs.build-base-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/base:debian12 \
+            --config tests/structure-tests/base.yaml || true
+
+      - name: Test cc image
+        if: needs.build-cc-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc:debian12 \
+            --config tests/structure-tests/cc.yaml || true
+
+      - name: Test python image
+        if: needs.build-python-3_13-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/python:3.13-debian12 \
+            --config tests/structure-tests/python.yaml || true
+
+      - name: Test nodejs image
+        if: needs.build-nodejs-22-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:22-debian12 \
+            --config tests/structure-tests/nodejs.yaml || true
+
+      - name: Test java image
+        if: needs.build-java-21-root.result == 'success'
+        run: |
+          container-structure-test test \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/java:21-debian12 \
+            --config tests/structure-tests/java.yaml || true
+
+  # ===========================================================================
+  # SECURITY SCAN
+  # ===========================================================================
+  security-scan:
+    needs:
+      - detect-changes
+      - build-static-root
+      - build-base-root
+      - build-cc-root
+      - build-python-3_13-root
+      - build-nodejs-22-root
+      - build-java-21-root
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.any_image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Scan static image
+        if: needs.build-static-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/static:debian12
+
+      - name: Scan base image
+        if: needs.build-base-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/base:debian12
+
+      - name: Scan cc image
+        if: needs.build-cc-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc:debian12
+
+      - name: Scan python image
+        if: needs.build-python-3_13-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/python:3.13-debian12
+
+      - name: Scan nodejs image
+        if: needs.build-nodejs-22-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:22-debian12
+
+      - name: Scan java image
+        if: needs.build-java-21-root.result == 'success'
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/java:21-debian12
+
+  # ===========================================================================
+  # SUMMARY
+  # ===========================================================================
+  summary:
+    needs:
+      - detect-changes
+      - lint-dockerfiles
+      - lint-shell
+      - lint-yaml
+      - lint-actions
+      - lint-markdown
+      - build-static-root
+      - build-static-nonroot
+      - build-base-root
+      - build-base-nonroot
+      - build-base-nossl-root
+      - build-base-nossl-nonroot
+      - build-cc-root
+      - build-cc-nonroot
+      - build-python-3_10-root
+      - build-python-3_10-nonroot
+      - build-python-3_11-root
+      - build-python-3_11-nonroot
+      - build-python-3_12-root
+      - build-python-3_12-nonroot
+      - build-python-3_13-root
+      - build-python-3_13-nonroot
+      - build-nodejs-20-root
+      - build-nodejs-20-nonroot
+      - build-nodejs-22-root
+      - build-nodejs-22-nonroot
+      - build-nodejs-24-root
+      - build-nodejs-24-nonroot
+      - build-java-17-root
+      - build-java-17-nonroot
+      - build-java-21-root
+      - build-java-21-nonroot
+      - build-debug-static-root
+      - build-debug-static-nonroot
+      - build-debug-base-root
+      - build-debug-base-nonroot
+      - build-debug-cc-root
+      - build-debug-cc-nonroot
+      - build-debug-python-root
+      - build-debug-python-nonroot
+      - build-debug-nodejs-root
+      - build-debug-nodejs-nonroot
+      - build-debug-java-root
+      - build-debug-java-nonroot
+      - test
+      - security-scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Summary
+        run: |
+          echo "## CI Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Lint Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dockerfiles | ${{ needs.lint-dockerfiles.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Shell | ${{ needs.lint-shell.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| YAML | ${{ needs.lint-yaml.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Actions | ${{ needs.lint-actions.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Markdown | ${{ needs.lint-markdown.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Build Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | Root | Nonroot |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| static | ${{ needs.build-static-root.result }} | ${{ needs.build-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| base | ${{ needs.build-base-root.result }} | ${{ needs.build-base-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| base-nossl | ${{ needs.build-base-nossl-root.result }} | ${{ needs.build-base-nossl-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| cc | ${{ needs.build-cc-root.result }} | ${{ needs.build-cc-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| python:3.10 | ${{ needs.build-python-3_10-root.result }} | ${{ needs.build-python-3_10-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| python:3.11 | ${{ needs.build-python-3_11-root.result }} | ${{ needs.build-python-3_11-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| python:3.12 | ${{ needs.build-python-3_12-root.result }} | ${{ needs.build-python-3_12-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| python:3.13 | ${{ needs.build-python-3_13-root.result }} | ${{ needs.build-python-3_13-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| nodejs:20 | ${{ needs.build-nodejs-20-root.result }} | ${{ needs.build-nodejs-20-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| nodejs:22 | ${{ needs.build-nodejs-22-root.result }} | ${{ needs.build-nodejs-22-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| nodejs:24 | ${{ needs.build-nodejs-24-root.result }} | ${{ needs.build-nodejs-24-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| java:17 | ${{ needs.build-java-17-root.result }} | ${{ needs.build-java-17-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| java:21 | ${{ needs.build-java-21-root.result }} | ${{ needs.build-java-21-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Debug Builds" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | Root | Nonroot |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| static | ${{ needs.build-debug-static-root.result }} | ${{ needs.build-debug-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| base | ${{ needs.build-debug-base-root.result }} | ${{ needs.build-debug-base-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| cc | ${{ needs.build-debug-cc-root.result }} | ${{ needs.build-debug-cc-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| python:3.13 | ${{ needs.build-debug-python-root.result }} | ${{ needs.build-debug-python-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| nodejs:22 | ${{ needs.build-debug-nodejs-root.result }} | ${{ needs.build-debug-nodejs-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| java:21 | ${{ needs.build-debug-java-root.result }} | ${{ needs.build-debug-java-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tests | ${{ needs.test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Security Scan | ${{ needs.security-scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
