@@ -66,6 +66,15 @@ test-nodejs: ## Run Node.js structure tests
 			--config tests/structure-tests/nodejs.yaml || true; \
 	done
 
+test-java: ## Run Java structure tests
+	@echo "=== Running Java structure tests ==="
+	@for version in $(JAVA_VERSIONS); do \
+		echo "Testing java:$$version..."; \
+		container-structure-test test \
+			--image $(REGISTRY)/$(IMAGE_PREFIX)/java:$$version-$(DEBIAN_VERSION) \
+			--config tests/structure-tests/java.yaml || true; \
+	done
+
 # =============================================================================
 # Build targets
 # =============================================================================
