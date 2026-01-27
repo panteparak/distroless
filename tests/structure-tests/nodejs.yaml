@@ -1,0 +1,93 @@
+# Container Structure Tests for Node.js Image
+# https://github.com/GoogleContainerTools/container-structure-test
+
+schemaVersion: "2.0.0"
+
+# =============================================================================
+# File Existence Tests
+# =============================================================================
+fileExistenceTests:
+  # Inherited from cc
+  - name: "CA certificates exist"
+    path: "/etc/ssl/certs/ca-certificates.crt"
+    shouldExist: true
+
+  - name: "libc.so.6 exists"
+    path: "/lib/x86_64-linux-gnu/libc.so.6"
+    shouldExist: true
+
+  - name: "libssl.so.3 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+    shouldExist: true
+
+  - name: "libstdc++.so.6 exists"
+    path: "/usr/lib/x86_64-linux-gnu/libstdc++.so.6"
+    shouldExist: true
+
+  # Node.js binaries
+  - name: "node binary exists"
+    path: "/nodejs/bin/node"
+    shouldExist: true
+
+  - name: "npm exists"
+    path: "/nodejs/bin/npm"
+    shouldExist: true
+
+  - name: "npx exists"
+    path: "/nodejs/bin/npx"
+    shouldExist: true
+
+  # Node.js lib directory
+  - name: "Node.js lib directory exists"
+    path: "/nodejs/lib/node_modules"
+    shouldExist: true
+
+  # No shell (distroless)
+  - name: "No shell exists"
+    path: "/bin/sh"
+    shouldExist: false
+
+  - name: "No apt exists"
+    path: "/usr/bin/apt"
+    shouldExist: false
+
+# =============================================================================
+# Command Tests
+# =============================================================================
+commandTests:
+  - name: "Node.js version check"
+    command: "node"
+    args: ["--version"]
+    expectedOutput: ["v2[024]\\."]
+    exitCode: 0
+
+  - name: "npm version check"
+    command: "npm"
+    args: ["--version"]
+    expectedOutput: ["[0-9]+\\.[0-9]+\\.[0-9]+"]
+    exitCode: 0
+
+  - name: "Node.js can require https"
+    command: "node"
+    args: ["-e", "require('https'); console.log('https ok')"]
+    expectedOutput: ["https ok"]
+    exitCode: 0
+
+  - name: "Node.js can require crypto"
+    command: "node"
+    args: ["-e", "require('crypto'); console.log('crypto ok')"]
+    expectedOutput: ["crypto ok"]
+    exitCode: 0
+
+# =============================================================================
+# Metadata Tests
+# =============================================================================
+metadataTest:
+  envVars:
+    - key: "PATH"
+      value: "/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    - key: "SSL_CERT_FILE"
+      value: "/etc/ssl/certs/ca-certificates.crt"
+  entrypoint: ["node"]
+  cmd: ["--version"]
+  workdir: "/app"

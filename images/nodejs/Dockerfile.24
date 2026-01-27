@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Node.js 24 Image (Current)
+# =============================================================================
+# CC image + Node.js 24.x runtime from official binaries
+#
+# Use for: Node.js applications requiring latest features
+# =============================================================================
+
+ARG CC_IMAGE=ghcr.io/panteparak/distroless/cc
+ARG TAG=debian12
+ARG DEBIAN_VERSION=bookworm
+
+# =============================================================================
+# Stage 1: Node.js Downloader
+# =============================================================================
+FROM debian:${DEBIAN_VERSION}-slim AS downloader
+
+ARG TARGETARCH
+ARG NODE_VERSION=24.13.0
+
+WORKDIR /nodejs
+
+# Install download tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and verify Node.js
+RUN set -eux; \
+    ARCH=""; \
+    case "${TARGETARCH}" in \
+        amd64) ARCH='x64' ;; \
+        arm64) ARCH='arm64' ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac; \
+    # Download Node.js
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.xz"; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt.asc"; \
+    # Import Node.js release signing keys
+    for key in \
+        4ED778F539E3634C779C87C6D7062848A1AB005C \
+        141F07595B7B3FFE74309A937405533BE57C7D57 \
+        74F12602B6F1C4E913FAA37AD3A89613643B6201 \
+        DD792F5973C6DE52C432CBDAC77ABFA00DDBF2B7 \
+        61FC681DFB92A079F1685E77973F295594EC4689 \
+        8FCCA13FEF1D0C2E91008E09770F7A9A5AE15600 \
+        C4F0DFFF4E8C1A8236409D08E73BC641CC11F4C8 \
+        890C08DB8579162FEE0DF9DB8BEAB4DFCF555EF4 \
+        C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C \
+        108F52B48DB57BB0CC439B2997B01419BD92F80A \
+        A363A499291CBBC940DD62E41F10027AF002F8B0 \
+    ; do \
+        gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$key" || \
+        gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key"; \
+    done; \
+    gpg --batch --verify SHASUMS256.txt.asc; \
+    grep "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" SHASUMS256.txt.asc | sha256sum -c -; \
+    # Extract Node.js
+    tar -xJf "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" --strip-components=1; \
+    rm -f "node-v${NODE_VERSION}-linux-${ARCH}.tar.xz" SHASUMS256.txt.asc; \
+    # Clean up unnecessary files
+    rm -rf include share CHANGELOG.md LICENSE README.md
+
+# =============================================================================
+# Stage 2: Final Distroless Node.js Image
+# =============================================================================
+FROM ${CC_IMAGE}:${TAG} AS nodejs
+
+# Build arguments for user configuration
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/app
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Node.js 24"
+LABEL org.opencontainers.image.description="CC image with Node.js 24 Current runtime"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+
+# Copy Node.js installation
+COPY --from=downloader /nodejs/bin /nodejs/bin
+COPY --from=downloader /nodejs/lib /nodejs/lib
+
+# Environment variables
+ENV NODE_VERSION=24.13.0 \
+    PATH="/nodejs/bin:$PATH"
+
+USER ${UID}
+WORKDIR ${WORKDIR}
+
+# Default to Node.js
+ENTRYPOINT ["node"]
+CMD ["--version"]
