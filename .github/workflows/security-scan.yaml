@@ -1,0 +1,197 @@
+name: Security Scan
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6am UTC
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Specific image to scan (e.g., static, base, python:3.13)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/distroless
+
+jobs:
+  scan-base-images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [static, base, base-nossl, cc]
+        debian: [debian12]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        env:
+          IMAGE: ${{ matrix.image }}
+          DEBIAN: ${{ matrix.debian }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          docker pull "${REGISTRY_PREFIX}/${IMAGE}:${DEBIAN}" || echo "Image not found, skipping"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ matrix.debian }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'  # Don't fail, just report
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: '${{ matrix.image }}-${{ matrix.debian }}'
+
+  scan-python-images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13']
+        debian: [debian12]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        env:
+          VERSION: ${{ matrix.version }}
+          DEBIAN: ${{ matrix.debian }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          docker pull "${REGISTRY_PREFIX}/python:${VERSION}-${DEBIAN}" || echo "Image not found, skipping"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/python:${{ matrix.version }}-${{ matrix.debian }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'python-${{ matrix.version }}-${{ matrix.debian }}'
+
+  scan-nodejs-images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['20', '22', '24']
+        debian: [debian12]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        env:
+          VERSION: ${{ matrix.version }}
+          DEBIAN: ${{ matrix.debian }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          docker pull "${REGISTRY_PREFIX}/nodejs:${VERSION}-${DEBIAN}" || echo "Image not found, skipping"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:${{ matrix.version }}-${{ matrix.debian }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'nodejs-${{ matrix.version }}-${{ matrix.debian }}'
+
+  scan-java-images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['17', '21']
+        debian: [debian12]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        env:
+          VERSION: ${{ matrix.version }}
+          DEBIAN: ${{ matrix.debian }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          docker pull "${REGISTRY_PREFIX}/java:${VERSION}-${DEBIAN}" || echo "Image not found, skipping"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/java:${{ matrix.version }}-${{ matrix.debian }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'java-${{ matrix.version }}-${{ matrix.debian }}'
+
+  summary:
+    needs: [scan-base-images, scan-python-images, scan-nodejs-images, scan-java-images]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Security scan summary
+        run: |
+          echo "## Security Scan Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Security scans completed. Check the Security tab for detailed vulnerability reports." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scanned images:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Base images: static, base, base-nossl, cc" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Python: 3.8, 3.9, 3.10, 3.11, 3.12, 3.13" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Node.js: 20, 22, 24" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Java: 17, 21" >> "$GITHUB_STEP_SUMMARY"
