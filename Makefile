@@ -75,7 +75,6 @@ test-java: ## Run Java structure tests
 			--config tests/structure-tests/java.yaml || true; \
 	done
 
-
 # =============================================================================
 # Build targets
 # =============================================================================
