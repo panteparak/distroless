@@ -1,0 +1,192 @@
+# Reusable workflow for building distroless images
+# This workflow handles Docker buildx setup, multi-arch builds, SBOM generation, and signing.
+#
+# Usage:
+#   jobs:
+#     build:
+#       uses: ./.github/workflows/_build-image.yaml
+#       with:
+#         image: python
+#         version: "3.13"
+#         dockerfile: images/python/Dockerfile.3.13
+#         variant: nonroot
+#       secrets: inherit
+
+name: Build Image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: 'Image name (e.g., static, base, cc, python)'
+        required: true
+        type: string
+      version:
+        description: 'Version tag (e.g., 3.13 for python, 22 for nodejs). Empty for base images.'
+        required: false
+        type: string
+        default: ''
+      dockerfile:
+        description: 'Path to Dockerfile'
+        required: true
+        type: string
+      context:
+        description: 'Build context path'
+        required: false
+        type: string
+        default: '.'
+      variant:
+        description: 'User variant (root or nonroot)'
+        required: false
+        type: string
+        default: 'root'
+      debian:
+        description: 'Debian version'
+        required: false
+        type: string
+        default: 'debian12'
+      build_args:
+        description: 'Additional build arguments (newline-separated KEY=VALUE)'
+        required: false
+        type: string
+        default: ''
+      platforms:
+        description: 'Target platforms'
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+      push:
+        description: 'Push to registry'
+        required: false
+        type: boolean
+        default: true
+      generate_sbom:
+        description: 'Generate SBOM'
+        required: false
+        type: boolean
+        default: true
+      sign_image:
+        description: 'Sign image with Cosign'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      digest:
+        description: 'Image digest'
+        value: ${{ jobs.build.outputs.digest }}
+      image_tag:
+        description: 'Primary image tag'
+        value: ${{ jobs.build.outputs.image_tag }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/distroless
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image_tag: ${{ steps.tags.outputs.primary_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate tags and build args
+        id: tags
+        env:
+          IMAGE: ${{ inputs.image }}
+          VERSION: ${{ inputs.version }}
+          VARIANT: ${{ inputs.variant }}
+          DEBIAN: ${{ inputs.debian }}
+          REGISTRY_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}
+        run: |
+          # Determine tag suffix based on variant
+          if [ "$VARIANT" = "nonroot" ]; then
+            TAG_SUFFIX="-nonroot"
+            UID="65532"
+            WORKDIR="/home/nonroot"
+          else
+            TAG_SUFFIX=""
+            UID="0"
+            WORKDIR="/app"
+          fi
+
+          # Build primary tag
+          if [ -n "$VERSION" ]; then
+            PRIMARY_TAG="${REGISTRY_PREFIX}/${IMAGE}:${VERSION}-${DEBIAN}${TAG_SUFFIX}"
+            SHORT_TAG="${REGISTRY_PREFIX}/${IMAGE}:${VERSION}${TAG_SUFFIX}"
+          else
+            PRIMARY_TAG="${REGISTRY_PREFIX}/${IMAGE}:${DEBIAN}${TAG_SUFFIX}"
+            SHORT_TAG="${REGISTRY_PREFIX}/${IMAGE}:latest${TAG_SUFFIX}"
+          fi
+
+          echo "primary_tag=${PRIMARY_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "tag_suffix=${TAG_SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "uid=${UID}" >> "$GITHUB_OUTPUT"
+          echo "workdir=${WORKDIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: |
+            ${{ steps.tags.outputs.primary_tag }}
+            ${{ steps.tags.outputs.short_tag }}
+          build-args: |
+            USER=${{ inputs.variant }}
+            UID=${{ steps.tags.outputs.uid }}
+            WORKDIR=${{ steps.tags.outputs.workdir }}
+            TAG=${{ inputs.debian }}${{ steps.tags.outputs.tag_suffix }}
+            ${{ inputs.build_args }}
+          cache-from: type=gha,scope=${{ inputs.image }}-${{ inputs.version }}-${{ inputs.variant }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image }}-${{ inputs.version }}-${{ inputs.variant }}
+
+      - name: Generate SBOM
+        if: inputs.generate_sbom && inputs.push
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.tags.outputs.primary_tag }}
+          format: spdx-json
+          output-file: sbom-${{ inputs.image }}-${{ inputs.version || 'base' }}.spdx.json
+
+      - name: Install Cosign
+        if: inputs.sign_image && inputs.push
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        if: inputs.sign_image && inputs.push
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          PRIMARY_TAG: ${{ steps.tags.outputs.primary_tag }}
+        run: |
+          cosign sign --yes "${PRIMARY_TAG}@${IMAGE_DIGEST}"
+
+      - name: Upload SBOM
+        if: inputs.generate_sbom && inputs.push
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ inputs.image }}-${{ inputs.version || 'base' }}-${{ inputs.variant }}
+          path: sbom-${{ inputs.image }}-${{ inputs.version || 'base' }}.spdx.json
