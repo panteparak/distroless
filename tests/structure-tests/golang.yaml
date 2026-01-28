@@ -1,0 +1,25 @@
+# Container structure tests for Golang distroless images
+
+schemaVersion: 2.0.0
+
+# Test working directory
+fileExistenceTests:
+  - name: "App directory exists"
+    path: /app
+    shouldExist: true
+
+# Metadata tests
+metadataTest:
+  workdir: /app
+
+# Command tests - verify the image is minimal
+commandTests:
+  - name: "No shell available"
+    command: "sh"
+    args: ["-c", "echo test"]
+    exitCode: 127
+
+  - name: "No bash available"
+    command: "bash"
+    args: ["-c", "echo test"]
+    exitCode: 127

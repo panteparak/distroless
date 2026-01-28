@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# Distroless Go Static Image
+# =============================================================================
+# Minimal image for statically compiled Go binaries (CGO_ENABLED=0)
+#
+# Use for: Pure Go applications without CGO dependencies
+# Build your Go app with: CGO_ENABLED=0 go build -ldflags="-s -w" ...
+#
+# Example multi-stage build:
+#   FROM golang:1.22 AS builder
+#   WORKDIR /app
+#   COPY . .
+#   RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app/myapp .
+#
+#   FROM ghcr.io/panteparak/distroless/golang:static
+#   COPY --from=builder /app/myapp /app/myapp
+#   ENTRYPOINT ["/app/myapp"]
+# =============================================================================
+
+ARG STATIC_IMAGE=ghcr.io/panteparak/distroless/static
+ARG TAG=debian12
+
+# =============================================================================
+# Final Go Static Image
+# =============================================================================
+FROM ${STATIC_IMAGE}:${TAG}
+
+# Build arguments for user configuration
+ARG USER=root
+ARG UID=0
+ARG WORKDIR=/app
+
+# Labels
+LABEL org.opencontainers.image.title="Distroless Go Static"
+LABEL org.opencontainers.image.description="Minimal image for statically compiled Go binaries"
+LABEL org.opencontainers.image.source="https://github.com/panteparak/distroless"
+LABEL org.opencontainers.image.documentation="Use with CGO_ENABLED=0 go build"
+
+# Set timezone data path (Go may look for this)
+ENV ZONEINFO=/usr/share/zoneinfo
+
+USER ${UID}
+WORKDIR ${WORKDIR}
+
+# No entrypoint - user provides their Go binary
+ENTRYPOINT []
+CMD []
