@@ -27,7 +27,7 @@ WORKDIR /extract
 # Debian 12 (bookworm): libgomp1, libstdc++6, libgcc-s1, gcc-12-base
 # Debian 13 (trixie): libgomp1, libstdc++6, libgcc-s1, gcc-14-base
 RUN apt-get update && \
-    cd /var/cache/apt/archives && \
+    mkdir -p /tmp/debs && cd /tmp/debs && \
     if [ "${DEBIAN_VERSION}" = "trixie" ]; then \
         apt-get download libgomp1 libstdc++6 libgcc-s1 gcc-14-base; \
     else \

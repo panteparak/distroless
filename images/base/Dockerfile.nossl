@@ -24,7 +24,7 @@ WORKDIR /extract
 
 # Download and extract only libc (no SSL)
 RUN apt-get update && \
-    cd /var/cache/apt/archives && \
+    mkdir -p /tmp/debs && cd /tmp/debs && \
     apt-get download libc6 && \
     mkdir -p /extract/rootfs && \
     for deb in *.deb; do \

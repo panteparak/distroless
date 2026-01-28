@@ -33,7 +33,7 @@ WORKDIR /extract
 # Download and extract required packages
 # Using current Debian repos (for reproducibility, consider using snapshot.debian.org)
 RUN apt-get update && \
-    cd /var/cache/apt/archives && \
+    mkdir -p /tmp/debs && cd /tmp/debs && \
     apt-get download \
         base-files \
         netbase \

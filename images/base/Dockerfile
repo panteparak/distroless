@@ -27,7 +27,7 @@ WORKDIR /extract
 # Debian 12 (bookworm): libc6, libssl3
 # Debian 13 (trixie): libc6, libssl3t64, libzstd1, zlib1g
 RUN apt-get update && \
-    cd /var/cache/apt/archives && \
+    mkdir -p /tmp/debs && cd /tmp/debs && \
     if [ "${DEBIAN_VERSION}" = "trixie" ]; then \
         apt-get download libc6 libssl3t64 libzstd1 zlib1g; \
     else \
