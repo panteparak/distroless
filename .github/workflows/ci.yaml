@@ -1,18 +1,12 @@
-# Unified CI Workflow
-# ====================
-# Single workflow that handles all CI tasks: lint, build, test, security scan
-# Uses change detection to skip unchanged images and cascades dependencies.
+# Unified CI Workflow with Dynamic Matrix
+# ========================================
+# Uses tiered dynamic matrices to build only what changed
+# while respecting dependency order.
 #
 # Image dependency chain:
 #   static → base → cc → python, nodejs, golang:cgo
 #   static → base-nossl → java
 #   static → golang:static
-#
-# Triggers:
-#   - Push to main: Full build + push
-#   - Pull requests: Lint only (no registry push)
-#   - Weekly schedule: Force rebuild all
-#   - Manual dispatch: Optional force rebuild
 
 name: CI
 
@@ -21,11 +15,11 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: '0 0 * * 0'  # Weekly Sunday midnight UTC
+    - cron: '0 0 * * 0'  # Weekly rebuild
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: 'Force rebuild all images (ignore change detection)'
+        description: 'Force rebuild all images'
         type: boolean
         default: false
 
@@ -36,24 +30,29 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ${{ github.repository_owner }}/distroless
+  DEBIAN_VERSION: debian12
 
 jobs:
-  # ===========================================================================
-  # CHANGE DETECTION
-  # ===========================================================================
+  # ============================================================================
+  # CHANGE DETECTION & MATRIX GENERATION
+  # ============================================================================
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      static: ${{ steps.final.outputs.static }}
-      base: ${{ steps.final.outputs.base }}
-      base_nossl: ${{ steps.final.outputs.base_nossl }}
-      cc: ${{ steps.final.outputs.cc }}
-      python: ${{ steps.final.outputs.python }}
-      nodejs: ${{ steps.final.outputs.nodejs }}
-      java: ${{ steps.final.outputs.java }}
-      golang: ${{ steps.final.outputs.golang }}
-      debug: ${{ steps.final.outputs.debug }}
-      any_image: ${{ steps.final.outputs.any_image }}
+      any_changes: ${{ steps.changes.outputs.any_changes }}
+      tier1_matrix: ${{ steps.matrix.outputs.tier1 }}
+      tier2_matrix: ${{ steps.matrix.outputs.tier2 }}
+      tier3_matrix: ${{ steps.matrix.outputs.tier3 }}
+      tier4_matrix: ${{ steps.matrix.outputs.tier4 }}
+      debug_matrix: ${{ steps.matrix.outputs.debug }}
+      test_matrix: ${{ steps.matrix.outputs.test }}
+      scan_matrix: ${{ steps.matrix.outputs.scan }}
+      skip_tier1: ${{ steps.matrix.outputs.skip_tier1 }}
+      skip_tier2: ${{ steps.matrix.outputs.skip_tier2 }}
+      skip_tier3: ${{ steps.matrix.outputs.skip_tier3 }}
+      skip_tier4: ${{ steps.matrix.outputs.skip_tier4 }}
+      skip_debug: ${{ steps.matrix.outputs.skip_debug }}
+      skip_test: ${{ steps.matrix.outputs.skip_test }}
     steps:
       - uses: actions/checkout@v4
 
@@ -66,7 +65,6 @@ jobs:
               - 'images/static/**'
             base:
               - 'images/base/Dockerfile'
-              - 'images/base/files/**'
             base_nossl:
               - 'images/base/Dockerfile.nossl'
             cc:
@@ -79,16 +77,13 @@ jobs:
               - 'images/java/**'
             golang:
               - 'images/golang/**'
-            debug:
-              - 'images/debug/**'
             workflows:
               - '.github/workflows/**'
 
-      - name: Calculate cascading changes
-        id: final
+      - name: Calculate changes with cascade
+        id: changes
         env:
           FORCE: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
-          IS_PR: ${{ github.event_name == 'pull_request' }}
           STATIC: ${{ steps.filter.outputs.static }}
           BASE: ${{ steps.filter.outputs.base }}
           BASE_NOSSL: ${{ steps.filter.outputs.base_nossl }}
@@ -97,76 +92,41 @@ jobs:
           NODEJS: ${{ steps.filter.outputs.nodejs }}
           JAVA: ${{ steps.filter.outputs.java }}
           GOLANG: ${{ steps.filter.outputs.golang }}
-          DEBUG: ${{ steps.filter.outputs.debug }}
           WORKFLOWS: ${{ steps.filter.outputs.workflows }}
         run: |
-          # PRs don't build images - only lint
-          if [ "$IS_PR" == "true" ]; then
-            for img in static base base_nossl cc python nodejs java golang debug; do
-              echo "${img}=false" >> "$GITHUB_OUTPUT"
-            done
-            echo "any_image=false" >> "$GITHUB_OUTPUT"
+          # Force or workflow changes = rebuild all
+          if [ "$FORCE" == "true" ] || [ "$WORKFLOWS" == "true" ]; then
+            echo "static=true" >> "$GITHUB_OUTPUT"
+            echo "base=true" >> "$GITHUB_OUTPUT"
+            echo "base_nossl=true" >> "$GITHUB_OUTPUT"
+            echo "cc=true" >> "$GITHUB_OUTPUT"
+            echo "python=true" >> "$GITHUB_OUTPUT"
+            echo "nodejs=true" >> "$GITHUB_OUTPUT"
+            echo "java=true" >> "$GITHUB_OUTPUT"
+            echo "golang=true" >> "$GITHUB_OUTPUT"
+            echo "any_changes=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Force rebuild sets everything to true
-          if [ "$FORCE" == "true" ]; then
-            for img in static base base_nossl cc python nodejs java golang debug; do
-              echo "${img}=true" >> "$GITHUB_OUTPUT"
-            done
-            echo "any_image=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Workflow changes trigger full rebuild
-          if [ "$WORKFLOWS" == "true" ]; then
-            for img in static base base_nossl cc python nodejs java golang debug; do
-              echo "${img}=true" >> "$GITHUB_OUTPUT"
-            done
-            echo "any_image=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Cascade dependencies
-          S=$STATIC
-          B=$BASE
-          BN=$BASE_NOSSL
-          C=$CC
-          P=$PYTHON
-          N=$NODEJS
-          J=$JAVA
-          G=$GOLANG
-          D=$DEBUG
+          # Apply cascade logic
+          S=$STATIC; B=$BASE; BN=$BASE_NOSSL; C=$CC
+          P=$PYTHON; N=$NODEJS; J=$JAVA; G=$GOLANG
 
           # static -> base, base-nossl, golang:static
           if [ "$S" == "true" ]; then
-            B=true
-            BN=true
-            G=true
+            B=true; BN=true; G=true
           fi
-
           # base -> cc
           if [ "$B" == "true" ]; then
             C=true
           fi
-
           # cc -> python, nodejs, golang:cgo
           if [ "$C" == "true" ]; then
-            P=true
-            N=true
-            G=true
+            P=true; N=true; G=true
           fi
-
           # base-nossl -> java
           if [ "$BN" == "true" ]; then
             J=true
-          fi
-
-          # Any image change triggers debug rebuild
-          if [ "$S" == "true" ] || [ "$B" == "true" ] || [ "$BN" == "true" ] || \
-             [ "$C" == "true" ] || [ "$P" == "true" ] || [ "$N" == "true" ] || \
-             [ "$J" == "true" ] || [ "$G" == "true" ] || [ "$D" == "true" ]; then
-            D=true
           fi
 
           echo "static=$S" >> "$GITHUB_OUTPUT"
@@ -177,25 +137,156 @@ jobs:
           echo "nodejs=$N" >> "$GITHUB_OUTPUT"
           echo "java=$J" >> "$GITHUB_OUTPUT"
           echo "golang=$G" >> "$GITHUB_OUTPUT"
-          echo "debug=$D" >> "$GITHUB_OUTPUT"
 
           if [ "$S" == "true" ] || [ "$B" == "true" ] || [ "$BN" == "true" ] || \
              [ "$C" == "true" ] || [ "$P" == "true" ] || [ "$N" == "true" ] || \
              [ "$J" == "true" ] || [ "$G" == "true" ]; then
-            echo "any_image=true" >> "$GITHUB_OUTPUT"
+            echo "any_changes=true" >> "$GITHUB_OUTPUT"
           else
-            echo "any_image=false" >> "$GITHUB_OUTPUT"
+            echo "any_changes=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # ===========================================================================
-  # LINT (parallel, always runs)
-  # ===========================================================================
+      - name: Generate dynamic matrices
+        id: matrix
+        env:
+          STATIC: ${{ steps.changes.outputs.static }}
+          BASE: ${{ steps.changes.outputs.base }}
+          BASE_NOSSL: ${{ steps.changes.outputs.base_nossl }}
+          CC: ${{ steps.changes.outputs.cc }}
+          PYTHON: ${{ steps.changes.outputs.python }}
+          NODEJS: ${{ steps.changes.outputs.nodejs }}
+          JAVA: ${{ steps.changes.outputs.java }}
+          GOLANG: ${{ steps.changes.outputs.golang }}
+        run: |
+          # Tier 1: static
+          if [ "$STATIC" == "true" ]; then
+            TIER1='{"include":[{"image":"static","dockerfile":"images/static/Dockerfile","context":"images/static","variant":"root"},{"image":"static","dockerfile":"images/static/Dockerfile","context":"images/static","variant":"nonroot"}]}'
+            echo "skip_tier1=false" >> "$GITHUB_OUTPUT"
+          else
+            TIER1='{"include":[{"skip":true}]}'
+            echo "skip_tier1=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tier1=$TIER1" >> "$GITHUB_OUTPUT"
+
+          # Tier 2: base, base-nossl
+          T2_ITEMS=()
+          if [ "$BASE" == "true" ]; then
+            T2_ITEMS+=('{"image":"base","dockerfile":"images/base/Dockerfile","context":"images/base","variant":"root"}')
+            T2_ITEMS+=('{"image":"base","dockerfile":"images/base/Dockerfile","context":"images/base","variant":"nonroot"}')
+          fi
+          if [ "$BASE_NOSSL" == "true" ]; then
+            T2_ITEMS+=('{"image":"base-nossl","dockerfile":"images/base/Dockerfile.nossl","context":"images/base","variant":"root"}')
+            T2_ITEMS+=('{"image":"base-nossl","dockerfile":"images/base/Dockerfile.nossl","context":"images/base","variant":"nonroot"}')
+          fi
+          if [ ${#T2_ITEMS[@]} -gt 0 ]; then
+            TIER2="{\"include\":[$(IFS=,; echo "${T2_ITEMS[*]}")]}"
+            echo "skip_tier2=false" >> "$GITHUB_OUTPUT"
+          else
+            TIER2='{"include":[{"skip":true}]}'
+            echo "skip_tier2=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tier2=$TIER2" >> "$GITHUB_OUTPUT"
+
+          # Tier 3: cc
+          if [ "$CC" == "true" ]; then
+            TIER3='{"include":[{"image":"cc","dockerfile":"images/cc/Dockerfile","context":"images/cc","variant":"root"},{"image":"cc","dockerfile":"images/cc/Dockerfile","context":"images/cc","variant":"nonroot"}]}'
+            echo "skip_tier3=false" >> "$GITHUB_OUTPUT"
+          else
+            TIER3='{"include":[{"skip":true}]}'
+            echo "skip_tier3=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tier3=$TIER3" >> "$GITHUB_OUTPUT"
+
+          # Tier 4: python, nodejs, java, golang
+          T4_ITEMS=()
+
+          if [ "$PYTHON" == "true" ]; then
+            for ver in 3.9 3.10 3.11 3.12 3.13; do
+              for var in root nonroot; do
+                T4_ITEMS+=("{\"image\":\"python\",\"version\":\"$ver\",\"dockerfile\":\"images/python/Dockerfile.$ver\",\"context\":\"images/python\",\"variant\":\"$var\"}")
+              done
+            done
+          fi
+
+          if [ "$NODEJS" == "true" ]; then
+            for ver in 20 22 24; do
+              for var in root nonroot; do
+                T4_ITEMS+=("{\"image\":\"nodejs\",\"version\":\"$ver\",\"dockerfile\":\"images/nodejs/Dockerfile.$ver\",\"context\":\"images/nodejs\",\"variant\":\"$var\"}")
+              done
+            done
+          fi
+
+          if [ "$JAVA" == "true" ]; then
+            for ver in 17 21; do
+              for var in root nonroot; do
+                T4_ITEMS+=("{\"image\":\"java\",\"version\":\"$ver\",\"dockerfile\":\"images/java/Dockerfile.$ver\",\"context\":\"images/java\",\"variant\":\"$var\"}")
+              done
+            done
+          fi
+
+          if [ "$GOLANG" == "true" ]; then
+            for ver in static cgo; do
+              for var in root nonroot; do
+                T4_ITEMS+=("{\"image\":\"golang\",\"version\":\"$ver\",\"dockerfile\":\"images/golang/Dockerfile.$ver\",\"context\":\"images/golang\",\"variant\":\"$var\"}")
+              done
+            done
+          fi
+
+          if [ ${#T4_ITEMS[@]} -gt 0 ]; then
+            TIER4="{\"include\":[$(IFS=,; echo "${T4_ITEMS[*]}")]}"
+            echo "skip_tier4=false" >> "$GITHUB_OUTPUT"
+          else
+            TIER4='{"include":[{"skip":true}]}'
+            echo "skip_tier4=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tier4=$TIER4" >> "$GITHUB_OUTPUT"
+
+          # Debug matrix (latest versions only)
+          DEBUG_ITEMS=()
+          [ "$STATIC" == "true" ] && DEBUG_ITEMS+=('{"image":"static","variant":"root"}' '{"image":"static","variant":"nonroot"}')
+          [ "$BASE" == "true" ] && DEBUG_ITEMS+=('{"image":"base","variant":"root"}' '{"image":"base","variant":"nonroot"}')
+          [ "$CC" == "true" ] && DEBUG_ITEMS+=('{"image":"cc","variant":"root"}' '{"image":"cc","variant":"nonroot"}')
+          [ "$PYTHON" == "true" ] && DEBUG_ITEMS+=('{"image":"python","version":"3.13","variant":"root"}' '{"image":"python","version":"3.13","variant":"nonroot"}')
+          [ "$NODEJS" == "true" ] && DEBUG_ITEMS+=('{"image":"nodejs","version":"24","variant":"root"}' '{"image":"nodejs","version":"24","variant":"nonroot"}')
+          [ "$JAVA" == "true" ] && DEBUG_ITEMS+=('{"image":"java","version":"21","variant":"root"}' '{"image":"java","version":"21","variant":"nonroot"}')
+
+          if [ ${#DEBUG_ITEMS[@]} -gt 0 ]; then
+            DEBUG="{\"include\":[$(IFS=,; echo "${DEBUG_ITEMS[*]}")]}"
+            echo "skip_debug=false" >> "$GITHUB_OUTPUT"
+          else
+            DEBUG='{"include":[{"skip":true}]}'
+            echo "skip_debug=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "debug=$DEBUG" >> "$GITHUB_OUTPUT"
+
+          # Test matrix
+          TEST_ITEMS=()
+          [ "$STATIC" == "true" ] && TEST_ITEMS+=('{"image":"static","test_config":"static.yaml"}')
+          [ "$BASE" == "true" ] && TEST_ITEMS+=('{"image":"base","test_config":"base.yaml"}')
+          [ "$CC" == "true" ] && TEST_ITEMS+=('{"image":"cc","test_config":"cc.yaml"}')
+          [ "$PYTHON" == "true" ] && TEST_ITEMS+=('{"image":"python","version":"3.13","test_config":"python.yaml"}')
+          [ "$NODEJS" == "true" ] && TEST_ITEMS+=('{"image":"nodejs","version":"24","test_config":"nodejs.yaml"}')
+          [ "$JAVA" == "true" ] && TEST_ITEMS+=('{"image":"java","version":"21","test_config":"java.yaml"}')
+          [ "$GOLANG" == "true" ] && TEST_ITEMS+=('{"image":"golang","version":"static","test_config":"golang.yaml"}')
+
+          if [ ${#TEST_ITEMS[@]} -gt 0 ]; then
+            TEST="{\"include\":[$(IFS=,; echo "${TEST_ITEMS[*]}")]}"
+            echo "skip_test=false" >> "$GITHUB_OUTPUT"
+          else
+            TEST='{"include":[{"skip":true}]}'
+            echo "skip_test=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "test=$TEST" >> "$GITHUB_OUTPUT"
+          echo "scan=$TEST" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # LINT (always runs, parallel jobs)
+  # ============================================================================
   lint-dockerfiles:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint Dockerfiles
-        uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@v3.1.0
         with:
           recursive: true
           ignore: DL3008,DL3013,DL3018,DL3003
@@ -205,8 +296,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint shell scripts
-        uses: ludeeus/action-shellcheck@master
+      - uses: ludeeus/action-shellcheck@master
         with:
           severity: warning
 
@@ -214,8 +304,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint YAML files
-        uses: ibiqlik/action-yamllint@v3
+      - uses: ibiqlik/action-yamllint@v3
         with:
           config_data: |
             extends: relaxed
@@ -227,8 +316,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint GitHub Actions
-        uses: raven-actions/actionlint@v2
+      - uses: raven-actions/actionlint@v2
         with:
           fail-on-error: true
           shellcheck: false
@@ -237,928 +325,421 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint Markdown files
-        uses: DavidAnson/markdownlint-cli2-action@v19
+      - uses: DavidAnson/markdownlint-cli2-action@v19
         with:
           globs: '**/*.md'
           config: |
-            { "MD013": false, "MD033": false, "MD041": false }
+            { "MD013": false, "MD033": false }
 
-  # ===========================================================================
-  # TIER 1: STATIC (foundation layer)
-  # ===========================================================================
-  build-static-root:
+  # ============================================================================
+  # TIER 1: STATIC (foundation image)
+  # ============================================================================
+  build-tier1:
     needs: [detect-changes]
-    if: needs.detect-changes.outputs.static == 'true'
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: static
-      dockerfile: images/static/Dockerfile
-      context: images/static
-      variant: root
-    secrets: inherit
-
-  build-static-nonroot:
-    needs: [detect-changes]
-    if: needs.detect-changes.outputs.static == 'true'
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: static
-      dockerfile: images/static/Dockerfile
-      context: images/static
-      variant: nonroot
-    secrets: inherit
-
-  # ===========================================================================
-  # TIER 2: BASE VARIANTS (depends on static)
-  # ===========================================================================
-  build-base-root:
-    needs: [detect-changes, build-static-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.base == 'true' &&
-      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: base
-      dockerfile: images/base/Dockerfile
-      context: images/base
-      variant: root
-    secrets: inherit
-
-  build-base-nonroot:
-    needs: [detect-changes, build-static-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.base == 'true' &&
-      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: base
-      dockerfile: images/base/Dockerfile
-      context: images/base
-      variant: nonroot
-    secrets: inherit
-
-  build-base-nossl-root:
-    needs: [detect-changes, build-static-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.base_nossl == 'true' &&
-      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: base-nossl
-      dockerfile: images/base/Dockerfile.nossl
-      context: images/base
-      variant: root
-    secrets: inherit
-
-  build-base-nossl-nonroot:
-    needs: [detect-changes, build-static-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.base_nossl == 'true' &&
-      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: base-nossl
-      dockerfile: images/base/Dockerfile.nossl
-      context: images/base
-      variant: nonroot
-    secrets: inherit
-
-  # ===========================================================================
-  # TIER 3: CC (depends on base)
-  # ===========================================================================
-  build-cc-root:
-    needs: [detect-changes, build-base-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.cc == 'true' &&
-      (needs.build-base-root.result == 'success' || needs.build-base-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: cc
-      dockerfile: images/cc/Dockerfile
-      context: images/cc
-      variant: root
-    secrets: inherit
-
-  build-cc-nonroot:
-    needs: [detect-changes, build-base-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.cc == 'true' &&
-      (needs.build-base-nonroot.result == 'success' || needs.build-base-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: cc
-      dockerfile: images/cc/Dockerfile
-      context: images/cc
-      variant: nonroot
-    secrets: inherit
-
-  # ===========================================================================
-  # TIER 4: LANGUAGE RUNTIMES (parallel within tier)
-  # ===========================================================================
-
-  # ---------------------------------------------------------------------------
-  # Golang Static (depends on static) - 2 variants
-  # ---------------------------------------------------------------------------
-  build-golang-static-root:
-    needs: [detect-changes, build-static-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.golang == 'true' &&
-      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: golang
-      version: 'static'
-      dockerfile: images/golang/Dockerfile.static
-      context: images/golang
-      variant: root
-    secrets: inherit
-
-  build-golang-static-nonroot:
-    needs: [detect-changes, build-static-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.golang == 'true' &&
-      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: golang
-      version: 'static'
-      dockerfile: images/golang/Dockerfile.static
-      context: images/golang
-      variant: nonroot
-    secrets: inherit
-
-  # ---------------------------------------------------------------------------
-  # Golang CGO (depends on cc) - 2 variants
-  # ---------------------------------------------------------------------------
-  build-golang-cgo-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.golang == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: golang
-      version: 'cgo'
-      dockerfile: images/golang/Dockerfile.cgo
-      context: images/golang
-      variant: root
-    secrets: inherit
-
-  build-golang-cgo-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.golang == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: golang
-      version: 'cgo'
-      dockerfile: images/golang/Dockerfile.cgo
-      context: images/golang
-      variant: nonroot
-    secrets: inherit
-
-  # ---------------------------------------------------------------------------
-  # Python (depends on cc) - 4 versions × 2 variants = 8 builds
-  # ---------------------------------------------------------------------------
-  build-python-3_10-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.10'
-      dockerfile: images/python/Dockerfile.3.10
-      context: images/python
-      variant: root
-    secrets: inherit
-
-  build-python-3_10-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.10'
-      dockerfile: images/python/Dockerfile.3.10
-      context: images/python
-      variant: nonroot
-    secrets: inherit
-
-  build-python-3_11-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.11'
-      dockerfile: images/python/Dockerfile.3.11
-      context: images/python
-      variant: root
-    secrets: inherit
-
-  build-python-3_11-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.11'
-      dockerfile: images/python/Dockerfile.3.11
-      context: images/python
-      variant: nonroot
-    secrets: inherit
-
-  build-python-3_12-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.12'
-      dockerfile: images/python/Dockerfile.3.12
-      context: images/python
-      variant: root
-    secrets: inherit
-
-  build-python-3_12-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.12'
-      dockerfile: images/python/Dockerfile.3.12
-      context: images/python
-      variant: nonroot
-    secrets: inherit
-
-  build-python-3_13-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.13'
-      dockerfile: images/python/Dockerfile.3.13
-      context: images/python
-      variant: root
-    secrets: inherit
-
-  build-python-3_13-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.python == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: python
-      version: '3.13'
-      dockerfile: images/python/Dockerfile.3.13
-      context: images/python
-      variant: nonroot
-    secrets: inherit
-
-  # ---------------------------------------------------------------------------
-  # Node.js (depends on cc) - 3 versions × 2 variants = 6 builds
-  # ---------------------------------------------------------------------------
-  build-nodejs-20-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.nodejs == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: nodejs
-      version: '20'
-      dockerfile: images/nodejs/Dockerfile.20
-      context: images/nodejs
-      variant: root
-    secrets: inherit
-
-  build-nodejs-20-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.nodejs == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: nodejs
-      version: '20'
-      dockerfile: images/nodejs/Dockerfile.20
-      context: images/nodejs
-      variant: nonroot
-    secrets: inherit
-
-  build-nodejs-22-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.nodejs == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: nodejs
-      version: '22'
-      dockerfile: images/nodejs/Dockerfile.22
-      context: images/nodejs
-      variant: root
-    secrets: inherit
-
-  build-nodejs-22-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.nodejs == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: nodejs
-      version: '22'
-      dockerfile: images/nodejs/Dockerfile.22
-      context: images/nodejs
-      variant: nonroot
-    secrets: inherit
-
-  build-nodejs-24-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.nodejs == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: nodejs
-      version: '24'
-      dockerfile: images/nodejs/Dockerfile.24
-      context: images/nodejs
-      variant: root
-    secrets: inherit
-
-  build-nodejs-24-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.nodejs == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: nodejs
-      version: '24'
-      dockerfile: images/nodejs/Dockerfile.24
-      context: images/nodejs
-      variant: nonroot
-    secrets: inherit
-
-  # ---------------------------------------------------------------------------
-  # Java (depends on base-nossl) - 2 versions × 2 variants = 4 builds
-  # ---------------------------------------------------------------------------
-  build-java-17-root:
-    needs: [detect-changes, build-base-nossl-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.java == 'true' &&
-      (needs.build-base-nossl-root.result == 'success' || needs.build-base-nossl-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: java
-      version: '17'
-      dockerfile: images/java/Dockerfile.17
-      context: images/java
-      variant: root
-    secrets: inherit
-
-  build-java-17-nonroot:
-    needs: [detect-changes, build-base-nossl-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.java == 'true' &&
-      (needs.build-base-nossl-nonroot.result == 'success' || needs.build-base-nossl-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: java
-      version: '17'
-      dockerfile: images/java/Dockerfile.17
-      context: images/java
-      variant: nonroot
-    secrets: inherit
-
-  build-java-21-root:
-    needs: [detect-changes, build-base-nossl-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.java == 'true' &&
-      (needs.build-base-nossl-root.result == 'success' || needs.build-base-nossl-root.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: java
-      version: '21'
-      dockerfile: images/java/Dockerfile.21
-      context: images/java
-      variant: root
-    secrets: inherit
-
-  build-java-21-nonroot:
-    needs: [detect-changes, build-base-nossl-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.java == 'true' &&
-      (needs.build-base-nossl-nonroot.result == 'success' || needs.build-base-nossl-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-image.yaml
-    with:
-      image: java
-      version: '21'
-      dockerfile: images/java/Dockerfile.21
-      context: images/java
-      variant: nonroot
-    secrets: inherit
-
-  # ===========================================================================
-  # TIER 5: DEBUG VARIANTS
-  # ===========================================================================
-  # Build debug variants for base images and latest runtime versions
-
-  # Base image debug variants
-  build-debug-static-root:
-    needs: [detect-changes, build-static-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-static-root.result == 'success' || needs.build-static-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: static
-      variant: root
-    secrets: inherit
-
-  build-debug-static-nonroot:
-    needs: [detect-changes, build-static-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-static-nonroot.result == 'success' || needs.build-static-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: static
-      variant: nonroot
-    secrets: inherit
-
-  build-debug-base-root:
-    needs: [detect-changes, build-base-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-base-root.result == 'success' || needs.build-base-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: base
-      variant: root
-    secrets: inherit
-
-  build-debug-base-nonroot:
-    needs: [detect-changes, build-base-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-base-nonroot.result == 'success' || needs.build-base-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: base
-      variant: nonroot
-    secrets: inherit
-
-  build-debug-cc-root:
-    needs: [detect-changes, build-cc-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-cc-root.result == 'success' || needs.build-cc-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: cc
-      variant: root
-    secrets: inherit
-
-  build-debug-cc-nonroot:
-    needs: [detect-changes, build-cc-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-cc-nonroot.result == 'success' || needs.build-cc-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: cc
-      variant: nonroot
-    secrets: inherit
-
-  # Language runtime debug variants (latest versions only)
-  build-debug-golang-root:
-    needs: [detect-changes, build-golang-static-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-golang-static-root.result == 'success' || needs.build-golang-static-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: golang
-      version: 'static'
-      variant: root
-    secrets: inherit
-
-  build-debug-golang-nonroot:
-    needs: [detect-changes, build-golang-static-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-golang-static-nonroot.result == 'success' || needs.build-golang-static-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: golang
-      version: 'static'
-      variant: nonroot
-    secrets: inherit
-
-  build-debug-python-root:
-    needs: [detect-changes, build-python-3_13-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-python-3_13-root.result == 'success' || needs.build-python-3_13-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: python
-      version: '3.13'
-      variant: root
-    secrets: inherit
-
-  build-debug-python-nonroot:
-    needs: [detect-changes, build-python-3_13-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-python-3_13-nonroot.result == 'success' || needs.build-python-3_13-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: python
-      version: '3.13'
-      variant: nonroot
-    secrets: inherit
-
-  build-debug-nodejs-root:
-    needs: [detect-changes, build-nodejs-22-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-nodejs-22-root.result == 'success' || needs.build-nodejs-22-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: nodejs
-      version: '22'
-      variant: root
-    secrets: inherit
-
-  build-debug-nodejs-nonroot:
-    needs: [detect-changes, build-nodejs-22-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-nodejs-22-nonroot.result == 'success' || needs.build-nodejs-22-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: nodejs
-      version: '22'
-      variant: nonroot
-    secrets: inherit
-
-  build-debug-java-root:
-    needs: [detect-changes, build-java-21-root]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-java-21-root.result == 'success' || needs.build-java-21-root.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: java
-      version: '21'
-      variant: root
-    secrets: inherit
-
-  build-debug-java-nonroot:
-    needs: [detect-changes, build-java-21-nonroot]
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.debug == 'true' &&
-      (needs.build-java-21-nonroot.result == 'success' || needs.build-java-21-nonroot.result == 'skipped')
-    uses: ./.github/workflows/_build-debug.yaml
-    with:
-      image: java
-      version: '21'
-      variant: nonroot
-    secrets: inherit
-
-  # ===========================================================================
-  # TESTS (after builds complete)
-  # ===========================================================================
-  test:
-    needs:
-      - detect-changes
-      - build-static-root
-      - build-base-root
-      - build-cc-root
-      - build-golang-static-root
-      - build-python-3_13-root
-      - build-nodejs-22-root
-      - build-java-21-root
-    if: |
-      always() && !cancelled() &&
-      needs.detect-changes.outputs.any_image == 'true'
+    if: needs.detect-changes.outputs.skip_tier1 != 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.tier1_matrix) }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set build args
+        id: args
+        run: |
+          if [ "${{ matrix.variant }}" == "nonroot" ]; then
+            echo "uid=65532" >> "$GITHUB_OUTPUT"
+            echo "workdir=/home/nonroot" >> "$GITHUB_OUTPUT"
+          else
+            echo "uid=0" >> "$GITHUB_OUTPUT"
+            echo "workdir=/" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest-${{ matrix.variant }}
+          build-args: |
+            USER=${{ matrix.variant }}
+            UID=${{ steps.args.outputs.uid }}
+            WORKDIR=${{ steps.args.outputs.workdir }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
+  # ============================================================================
+  # TIER 2: BASE & BASE-NOSSL (depends on static)
+  # ============================================================================
+  build-tier2:
+    needs: [detect-changes, build-tier1]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.skip_tier2 != 'true' &&
+      (needs.build-tier1.result == 'success' || needs.build-tier1.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.tier2_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set build args
+        id: args
+        run: |
+          if [ "${{ matrix.variant }}" == "nonroot" ]; then
+            echo "uid=65532" >> "$GITHUB_OUTPUT"
+            echo "workdir=/home/nonroot" >> "$GITHUB_OUTPUT"
+          else
+            echo "uid=0" >> "$GITHUB_OUTPUT"
+            echo "workdir=/" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest-${{ matrix.variant }}
+          build-args: |
+            STATIC_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/static
+            TAG=${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            USER=${{ matrix.variant }}
+            UID=${{ steps.args.outputs.uid }}
+            WORKDIR=${{ steps.args.outputs.workdir }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # TIER 3: CC (depends on base)
+  # ============================================================================
+  build-tier3:
+    needs: [detect-changes, build-tier2]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.skip_tier3 != 'true' &&
+      (needs.build-tier2.result == 'success' || needs.build-tier2.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.tier3_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set build args
+        id: args
+        run: |
+          if [ "${{ matrix.variant }}" == "nonroot" ]; then
+            echo "uid=65532" >> "$GITHUB_OUTPUT"
+            echo "workdir=/home/nonroot" >> "$GITHUB_OUTPUT"
+          else
+            echo "uid=0" >> "$GITHUB_OUTPUT"
+            echo "workdir=/" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest-${{ matrix.variant }}
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/base
+            TAG=${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            USER=${{ matrix.variant }}
+            UID=${{ steps.args.outputs.uid }}
+            WORKDIR=${{ steps.args.outputs.workdir }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # TIER 4: LANGUAGE RUNTIMES (python, nodejs, java, golang)
+  # ============================================================================
+  build-tier4:
+    needs: [detect-changes, build-tier1, build-tier2, build-tier3]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.skip_tier4 != 'true' &&
+      (needs.build-tier1.result == 'success' || needs.build-tier1.result == 'skipped') &&
+      (needs.build-tier2.result == 'success' || needs.build-tier2.result == 'skipped') &&
+      (needs.build-tier3.result == 'success' || needs.build-tier3.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.tier4_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set build args
+        id: args
+        run: |
+          if [ "${{ matrix.variant }}" == "nonroot" ]; then
+            echo "uid=65532" >> "$GITHUB_OUTPUT"
+            echo "workdir=/home/nonroot" >> "$GITHUB_OUTPUT"
+          else
+            echo "uid=0" >> "$GITHUB_OUTPUT"
+            echo "workdir=/" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Determine base image based on image type
+          case "${{ matrix.image }}" in
+            python|nodejs)
+              echo "base_image=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc" >> "$GITHUB_OUTPUT"
+              echo "base_arg=CC_IMAGE" >> "$GITHUB_OUTPUT"
+              ;;
+            java)
+              echo "base_image=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/base-nossl" >> "$GITHUB_OUTPUT"
+              echo "base_arg=BASE_IMAGE" >> "$GITHUB_OUTPUT"
+              ;;
+            golang)
+              if [ "${{ matrix.version }}" == "static" ]; then
+                echo "base_image=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/static" >> "$GITHUB_OUTPUT"
+                echo "base_arg=STATIC_IMAGE" >> "$GITHUB_OUTPUT"
+              else
+                echo "base_image=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc" >> "$GITHUB_OUTPUT"
+                echo "base_arg=CC_IMAGE" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+          esac
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ matrix.version }}-${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ matrix.version }}-${{ matrix.variant }}
+          build-args: |
+            ${{ steps.args.outputs.base_arg }}=${{ steps.args.outputs.base_image }}
+            TAG=${{ env.DEBIAN_VERSION }}-${{ matrix.variant }}
+            USER=${{ matrix.variant }}
+            UID=${{ steps.args.outputs.uid }}
+            WORKDIR=${{ steps.args.outputs.workdir }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # DEBUG BUILDS
+  # ============================================================================
+  build-debug:
+    needs: [detect-changes, build-tier1, build-tier2, build-tier3, build-tier4]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.skip_debug != 'true' &&
+      github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.debug_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Determine base image tag
+        id: base
+        run: |
+          VERSION="${{ matrix.version }}"
+          VARIANT="${{ matrix.variant }}"
+          if [ -n "$VERSION" ]; then
+            echo "tag=${VERSION}-${{ env.DEBIAN_VERSION }}-${VARIANT}" >> "$GITHUB_OUTPUT"
+            echo "debug_tag=${VERSION}-${{ env.DEBIAN_VERSION }}-debug-${VARIANT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ env.DEBIAN_VERSION }}-${VARIANT}" >> "$GITHUB_OUTPUT"
+            echo "debug_tag=${{ env.DEBIAN_VERSION }}-debug-${VARIANT}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push debug
+        uses: docker/build-push-action@v5
+        with:
+          context: images/${{ matrix.image }}
+          file: images/${{ matrix.image }}/Dockerfile.debug
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.base.outputs.debug_tag }}
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+            TAG=${{ steps.base.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # STRUCTURE TESTS
+  # ============================================================================
+  test:
+    needs: [detect-changes, build-tier1, build-tier2, build-tier3, build-tier4]
+    if: |
+      always() && !cancelled() &&
+      needs.detect-changes.outputs.skip_test != 'true' &&
+      github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
       - name: Install container-structure-test
         run: |
           curl -LO https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64
           chmod +x container-structure-test-linux-amd64
           sudo mv container-structure-test-linux-amd64 /usr/local/bin/container-structure-test
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Test static image
-        if: needs.build-static-root.result == 'success'
+      - name: Determine image tag
+        id: tag
+        run: |
+          VERSION="${{ matrix.version }}"
+          if [ -n "$VERSION" ]; then
+            echo "tag=${VERSION}-${{ env.DEBIAN_VERSION }}-root" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ env.DEBIAN_VERSION }}-root" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pull image
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.tag.outputs.tag }}
+      - name: Run structure tests
         run: |
           container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/static:debian12 \
-            --config tests/structure-tests/static.yaml || true
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.tag.outputs.tag }} \
+            --config tests/structure-tests/${{ matrix.test_config }}
 
-      - name: Test base image
-        if: needs.build-base-root.result == 'success'
-        run: |
-          container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/base:debian12 \
-            --config tests/structure-tests/base.yaml || true
-
-      - name: Test cc image
-        if: needs.build-cc-root.result == 'success'
-        run: |
-          container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc:debian12 \
-            --config tests/structure-tests/cc.yaml || true
-
-      - name: Test golang image
-        if: needs.build-golang-static-root.result == 'success'
-        run: |
-          container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/golang:static-debian12 \
-            --config tests/structure-tests/golang.yaml || true
-
-      - name: Test python image
-        if: needs.build-python-3_13-root.result == 'success'
-        run: |
-          container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/python:3.13-debian12 \
-            --config tests/structure-tests/python.yaml || true
-
-      - name: Test nodejs image
-        if: needs.build-nodejs-22-root.result == 'success'
-        run: |
-          container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:22-debian12 \
-            --config tests/structure-tests/nodejs.yaml || true
-
-      - name: Test java image
-        if: needs.build-java-21-root.result == 'success'
-        run: |
-          container-structure-test test \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/java:21-debian12 \
-            --config tests/structure-tests/java.yaml || true
-
-  # ===========================================================================
+  # ============================================================================
   # SECURITY SCAN
-  # ===========================================================================
+  # ============================================================================
   security-scan:
-    needs:
-      - detect-changes
-      - build-static-root
-      - build-base-root
-      - build-cc-root
-      - build-golang-static-root
-      - build-python-3_13-root
-      - build-nodejs-22-root
-      - build-java-21-root
+    needs: [detect-changes, build-tier1, build-tier2, build-tier3, build-tier4]
     if: |
       always() && !cancelled() &&
-      needs.detect-changes.outputs.any_image == 'true'
+      needs.detect-changes.outputs.skip_test != 'true' &&
+      github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.scan_matrix) }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - name: Determine image tag
+        id: tag
+        run: |
+          VERSION="${{ matrix.version }}"
+          if [ -n "$VERSION" ]; then
+            echo "tag=${VERSION}-${{ env.DEBIAN_VERSION }}-root" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ env.DEBIAN_VERSION }}-root" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.tag.outputs.tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
 
-      - name: Install Trivy
-        run: |
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
-
-      - name: Scan static image
-        if: needs.build-static-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/static:debian12
-
-      - name: Scan base image
-        if: needs.build-base-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/base:debian12
-
-      - name: Scan cc image
-        if: needs.build-cc-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/cc:debian12
-
-      - name: Scan golang image
-        if: needs.build-golang-static-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/golang:static-debian12
-
-      - name: Scan python image
-        if: needs.build-python-3_13-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/python:3.13-debian12
-
-      - name: Scan nodejs image
-        if: needs.build-nodejs-22-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/nodejs:22-debian12
-
-      - name: Scan java image
-        if: needs.build-java-21-root.result == 'success'
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/java:21-debian12
-
-  # ===========================================================================
+  # ============================================================================
   # SUMMARY
-  # ===========================================================================
+  # ============================================================================
   summary:
-    needs:
-      - detect-changes
-      - lint-dockerfiles
-      - lint-shell
-      - lint-yaml
-      - lint-actions
-      - lint-markdown
-      - build-static-root
-      - build-static-nonroot
-      - build-base-root
-      - build-base-nonroot
-      - build-base-nossl-root
-      - build-base-nossl-nonroot
-      - build-cc-root
-      - build-cc-nonroot
-      - build-golang-static-root
-      - build-golang-static-nonroot
-      - build-golang-cgo-root
-      - build-golang-cgo-nonroot
-      - build-python-3_10-root
-      - build-python-3_10-nonroot
-      - build-python-3_11-root
-      - build-python-3_11-nonroot
-      - build-python-3_12-root
-      - build-python-3_12-nonroot
-      - build-python-3_13-root
-      - build-python-3_13-nonroot
-      - build-nodejs-20-root
-      - build-nodejs-20-nonroot
-      - build-nodejs-22-root
-      - build-nodejs-22-nonroot
-      - build-nodejs-24-root
-      - build-nodejs-24-nonroot
-      - build-java-17-root
-      - build-java-17-nonroot
-      - build-java-21-root
-      - build-java-21-nonroot
-      - build-debug-static-root
-      - build-debug-static-nonroot
-      - build-debug-base-root
-      - build-debug-base-nonroot
-      - build-debug-cc-root
-      - build-debug-cc-nonroot
-      - build-debug-golang-root
-      - build-debug-golang-nonroot
-      - build-debug-python-root
-      - build-debug-python-nonroot
-      - build-debug-nodejs-root
-      - build-debug-nodejs-nonroot
-      - build-debug-java-root
-      - build-debug-java-nonroot
-      - test
-      - security-scan
+    needs: [lint-dockerfiles, lint-shell, lint-yaml, lint-actions, lint-markdown,
+            build-tier1, build-tier2, build-tier3, build-tier4, build-debug, test, security-scan]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Build Summary
+      - name: Generate summary
         run: |
-          echo "## CI Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Lint Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Dockerfiles | ${{ needs.lint-dockerfiles.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Shell | ${{ needs.lint-shell.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| YAML | ${{ needs.lint-yaml.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Actions | ${{ needs.lint-actions.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Markdown | ${{ needs.lint-markdown.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Build Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | Root | Nonroot |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|------|---------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| static | ${{ needs.build-static-root.result }} | ${{ needs.build-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| base | ${{ needs.build-base-root.result }} | ${{ needs.build-base-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| base-nossl | ${{ needs.build-base-nossl-root.result }} | ${{ needs.build-base-nossl-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| cc | ${{ needs.build-cc-root.result }} | ${{ needs.build-cc-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| golang:static | ${{ needs.build-golang-static-root.result }} | ${{ needs.build-golang-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| golang:cgo | ${{ needs.build-golang-cgo-root.result }} | ${{ needs.build-golang-cgo-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| python:3.10 | ${{ needs.build-python-3_10-root.result }} | ${{ needs.build-python-3_10-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| python:3.11 | ${{ needs.build-python-3_11-root.result }} | ${{ needs.build-python-3_11-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| python:3.12 | ${{ needs.build-python-3_12-root.result }} | ${{ needs.build-python-3_12-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| python:3.13 | ${{ needs.build-python-3_13-root.result }} | ${{ needs.build-python-3_13-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| nodejs:20 | ${{ needs.build-nodejs-20-root.result }} | ${{ needs.build-nodejs-20-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| nodejs:22 | ${{ needs.build-nodejs-22-root.result }} | ${{ needs.build-nodejs-22-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| nodejs:24 | ${{ needs.build-nodejs-24-root.result }} | ${{ needs.build-nodejs-24-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| java:17 | ${{ needs.build-java-17-root.result }} | ${{ needs.build-java-17-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| java:21 | ${{ needs.build-java-21-root.result }} | ${{ needs.build-java-21-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Debug Builds" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | Root | Nonroot |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|------|---------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| static | ${{ needs.build-debug-static-root.result }} | ${{ needs.build-debug-static-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| base | ${{ needs.build-debug-base-root.result }} | ${{ needs.build-debug-base-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| cc | ${{ needs.build-debug-cc-root.result }} | ${{ needs.build-debug-cc-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| golang:static | ${{ needs.build-debug-golang-root.result }} | ${{ needs.build-debug-golang-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| python:3.13 | ${{ needs.build-debug-python-root.result }} | ${{ needs.build-debug-python-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| nodejs:22 | ${{ needs.build-debug-nodejs-root.result }} | ${{ needs.build-debug-nodejs-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| java:21 | ${{ needs.build-debug-java-root.result }} | ${{ needs.build-debug-java-nonroot.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Verification" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Tests | ${{ needs.test.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Security Scan | ${{ needs.security-scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "## CI Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Lint Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Dockerfiles | ${{ needs.lint-dockerfiles.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Shell | ${{ needs.lint-shell.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| YAML | ${{ needs.lint-yaml.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actions | ${{ needs.lint-actions.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Markdown | ${{ needs.lint-markdown.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Tier | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tier 1 (static) | ${{ needs.build-tier1.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tier 2 (base) | ${{ needs.build-tier2.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tier 3 (cc) | ${{ needs.build-tier3.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tier 4 (runtimes) | ${{ needs.build-tier4.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Debug | ${{ needs.build-debug.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Quality Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Scan | ${{ needs.security-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+      - name: Check for failures
+        if: |
+          needs.lint-dockerfiles.result == 'failure' ||
+          needs.lint-shell.result == 'failure' ||
+          needs.lint-yaml.result == 'failure' ||
+          needs.lint-actions.result == 'failure' ||
+          needs.build-tier1.result == 'failure' ||
+          needs.build-tier2.result == 'failure' ||
+          needs.build-tier3.result == 'failure' ||
+          needs.build-tier4.result == 'failure'
+        run: exit 1
