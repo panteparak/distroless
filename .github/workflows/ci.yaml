@@ -59,7 +59,7 @@ jobs:
       skip_debug: ${{ steps.matrix.outputs.skip_debug }}
       skip_test: ${{ steps.matrix.outputs.skip_test }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Detect changed paths
         id: filter
@@ -290,7 +290,7 @@ jobs:
   lint-dockerfiles:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: hadolint/hadolint-action@v3.1.0
         with:
           recursive: true
@@ -300,7 +300,7 @@ jobs:
   lint-shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ludeeus/action-shellcheck@master
         with:
           severity: warning
@@ -308,7 +308,7 @@ jobs:
   lint-yaml:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ibiqlik/action-yamllint@v3
         with:
           config_data: |
@@ -320,7 +320,7 @@ jobs:
   lint-actions:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: raven-actions/actionlint@v2
         with:
           fail-on-error: true
@@ -329,7 +329,7 @@ jobs:
   lint-markdown:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: DavidAnson/markdownlint-cli2-action@v19
         with:
           globs: '**/*.md'
@@ -347,7 +347,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.tier1_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -400,7 +400,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.tier2_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -455,7 +455,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.tier3_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -512,7 +512,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.tier4_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -588,7 +588,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.debug_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -640,7 +640,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.test_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install container-structure-test
         run: |
           curl -LO https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64
@@ -678,7 +678,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect-changes.outputs.scan_matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Determine image tag
         id: tag
         run: |
