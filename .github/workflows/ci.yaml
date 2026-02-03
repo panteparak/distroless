@@ -370,7 +370,7 @@ jobs:
             echo "workdir=/" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -423,7 +423,7 @@ jobs:
             echo "workdir=/" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -478,7 +478,7 @@ jobs:
             echo "workdir=/" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -556,7 +556,7 @@ jobs:
               ;;
           esac
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -612,7 +612,7 @@ jobs:
             echo "debug_tag=${{ env.DEBIAN_VERSION }}-debug-${VARIANT}" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and push debug
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: images/${{ matrix.image }}
           file: images/${{ matrix.image }}/Dockerfile.debug
